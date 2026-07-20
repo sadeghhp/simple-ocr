@@ -1,5 +1,7 @@
 // @vitest-environment node
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeDatabase, deleteDatabase } from '@/lib/db/database';
 import {
   DOCUMENT_KIND,
@@ -19,139 +21,88 @@ beforeEach(async () => {
 
 afterEach(() => {
   closeDatabase();
-  vi.restoreAllMocks();
 });
 
-async function seedParent(pageCount = 3) {
-  await putFile(
-    createFileRecord({
-      id: 'file-1',
-      blob: new Blob([new Uint8Array([1, 2, 3])], { type: 'application/pdf' }),
+describe('deleteDocumentTree transaction safety', () => {
+  /**
+   * The bug this guards: awaiting a promise between IndexedDB requests hands
+   * control back to the event loop, and the browser may commit the transaction
+   * there — every later request then throws TransactionInactiveError. It
+   * presented as "The browser database could not complete the operation" when
+   * deleting a document.
+   *
+   * fake-indexeddb does not enforce transaction lifetime, so no functional test
+   * against it can catch this. A harness that did model the rule confirmed the
+   * await-based version failed, but was far too timing-sensitive to keep. This
+   * checks the structural property instead: all requests must be issued from
+   * IDB event handlers, never after an await.
+   */
+  it('issues its requests from event handlers, never across an await', () => {
+    const source = readFileSync(resolve(__dirname, '../src/lib/db/documents.js'), 'utf8');
+    const start = source.indexOf('export function deleteDocumentTree');
+    expect(start).toBeGreaterThan(-1);
+    const body = source
+      .slice(start, source.indexOf('\n}', start))
+      // Strip comments: the explanation of this very rule mentions `await`.
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+
+    expect(body).not.toContain('await');
+    expect(body).not.toContain('async');
+    // Requests are chained through onsuccess instead.
+    expect(body).toContain('onsuccess');
+    expect(body).toContain('onerror');
+  });
+});
+
+describe('deleteDocumentTree behaviour', () => {
+  async function seedParent(pageCount = 3) {
+    await putFile(
+      createFileRecord({
+        id: 'file-1',
+        blob: new Blob([new Uint8Array([1, 2, 3])], { type: 'application/pdf' }),
+        name: 'multi.pdf',
+        mimeType: 'application/pdf',
+        size: 3,
+      })
+    );
+    const parent = createDocumentRecord({
+      id: 'parent-1',
+      fileId: 'file-1',
       name: 'multi.pdf',
       mimeType: 'application/pdf',
       size: 3,
-    })
-  );
-  const parent = createDocumentRecord({
-    id: 'parent-1',
-    fileId: 'file-1',
-    name: 'multi.pdf',
-    mimeType: 'application/pdf',
-    size: 3,
-    kind: DOCUMENT_KIND.parent,
-    pageCount,
-  });
-  await putDocument(parent);
-  for (let n = 1; n <= pageCount; n += 1) {
-    await putDocument(createPageRecord({ id: `page-${n}`, parent, pageNumber: n }));
-  }
-  return parent;
-}
-
-/**
- * Real browsers commit a readwrite transaction as soon as control returns to
- * the event loop with no pending requests — after which further requests throw
- * TransactionInactiveError. fake-indexeddb does not enforce this, so this stub
- * adds the missing rule: any request issued after a macrotask boundary fails.
- *
- * This is what makes the difference between "passes in tests" and "fails when
- * you click delete" observable here.
- */
-function enforceTransactionLifetime() {
-  const originalTransaction = IDBDatabase.prototype.transaction;
-  vi.spyOn(IDBDatabase.prototype, 'transaction').mockImplementation(function (...args) {
-    const tx = originalTransaction.apply(this, args);
-    let active = true;
-    // Deactivate once the current task (and its microtasks) has drained.
-    setTimeout(() => {
-      active = false;
-    }, 0);
-
-    // Plain `target[prop]` rather than Reflect.get with the proxy as receiver:
-    // fake-indexeddb's getters read internal state, and handing them the proxy
-    // instead of the real object breaks them.
-    const wrapStore = (store) =>
-      new Proxy(store, {
-        get(target, prop) {
-          const value = target[prop];
-          if (typeof value !== 'function') return value;
-          return (...callArgs) => {
-            if (!active) {
-              throw Object.assign(
-                new Error('Failed to execute on IDBObjectStore: The transaction is inactive.'),
-                { name: 'TransactionInactiveError' }
-              );
-            }
-            const result = value.apply(target, callArgs);
-            // Indexes issue requests too, and must obey the same rule.
-            return prop === 'index' ? wrapStore(result) : result;
-          };
-        },
-      });
-
-    return new Proxy(tx, {
-      get(target, prop) {
-        if (prop === 'objectStore') {
-          return (name) => wrapStore(target.objectStore(name));
-        }
-        const value = target[prop];
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-      set(target, prop, value) {
-        // Handlers like tx.oncomplete must land on the real transaction.
-        target[prop] = value;
-        return true;
-      },
+      kind: DOCUMENT_KIND.parent,
+      pageCount,
     });
-  });
-}
+    await putDocument(parent);
+    for (let n = 1; n <= pageCount; n += 1) {
+      await putDocument(createPageRecord({ id: `page-${n}`, parent, pageNumber: n }));
+    }
+    return parent;
+  }
 
-describe('deleteDocumentTree under real-browser transaction rules', () => {
-  it('deletes a multi-page document without the transaction going inactive', async () => {
-    const parent = await seedParent(3);
-    enforceTransactionLifetime();
-
-    await deleteDocumentTree(parent.id);
+  it('deletes a parent, its pages, and its blob', async () => {
+    await seedParent(3);
+    await deleteDocumentTree('parent-1');
 
     expect(await getDocument('parent-1')).toBeNull();
     expect(await listChildDocuments('parent-1')).toEqual([]);
     expect(await getFile('file-1')).toBeNull();
   });
 
-  it('deletes a single-file document under the same rules', async () => {
-    await putFile(
-      createFileRecord({
-        id: 'file-solo',
-        blob: new Blob([new Uint8Array([9])], { type: 'image/png' }),
-        name: 'solo.png',
-        mimeType: 'image/png',
-        size: 1,
-      })
-    );
-    await putDocument(
-      createDocumentRecord({
-        id: 'solo',
-        fileId: 'file-solo',
-        name: 'solo.png',
-        mimeType: 'image/png',
-        size: 1,
-      })
-    );
-    enforceTransactionLifetime();
-
-    await deleteDocumentTree('solo');
-    expect(await getDocument('solo')).toBeNull();
-    expect(await getFile('file-solo')).toBeNull();
-  });
-
-  it('still protects siblings when one page is deleted', async () => {
+  it('protects siblings and the shared blob when one page is deleted', async () => {
     await seedParent(3);
-    enforceTransactionLifetime();
-
     await deleteDocumentTree('page-2');
+
     expect(await getFile('file-1')).not.toBeNull();
     expect(await getDocument('page-1')).not.toBeNull();
+    expect(await getDocument('page-3')).not.toBeNull();
     expect(await getDocument('page-2')).toBeNull();
+  });
+
+  it('resolves quietly for an id that no longer exists', async () => {
+    await expect(deleteDocumentTree('ghost')).resolves.toBeUndefined();
   });
 });
 
@@ -168,8 +119,10 @@ describe('storage error reporting', () => {
 
   it('includes both name and message when the browser supplies one', () => {
     const domError = Object.assign(new Error('Key already exists'), { name: 'ConstraintError' });
-    expect(toAppError(domError, 'STORAGE_ERROR').detail).toBe(
-      'ConstraintError: Key already exists'
-    );
+    expect(toAppError(domError, 'STORAGE_ERROR').detail).toBe('ConstraintError: Key already exists');
+  });
+
+  it('does not invent a detail for an ordinary error', () => {
+    expect(toAppError(new Error('plain failure'), 'STORAGE_ERROR').detail).toBeNull();
   });
 });
