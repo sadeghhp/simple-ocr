@@ -149,22 +149,43 @@ export function updateDocument(id, patch) {
  * remaining sibling.
  */
 export function deleteDocumentTree(id) {
-  return withTransaction([STORES.documents, STORES.files], 'readwrite', async (tx) => {
+  return withTransaction([STORES.documents, STORES.files], 'readwrite', (tx) => {
     const docStore = tx.objectStore(STORES.documents);
-    const doc = await requestToPromise(docStore.get(id));
-    if (!doc) return;
+    const fileStore = tx.objectStore(STORES.files);
 
-    const children =
-      doc.kind === DOCUMENT_KIND.parent
-        ? (await requestToPromise(docStore.index('parentId').getAll(id))) || []
-        : [];
-    for (const child of children) {
-      await requestToPromise(docStore.delete(child.id));
-    }
+    // Every request is issued from inside an IndexedDB event handler rather
+    // than after `await`. Awaiting a promise between requests hands control
+    // back to the event loop, and a browser is free to commit the transaction
+    // at that point — after which further requests throw
+    // TransactionInactiveError. fake-indexeddb is lenient about this, so the
+    // await-based version tested clean while failing in a real browser.
+    return new Promise((resolve, reject) => {
+      const finish = (doc) => {
+        docStore.delete(id);
+        // Child pages share the parent's blob, so only an owner may delete it.
+        if (doc.ownsFile !== false && doc.fileId) fileStore.delete(doc.fileId);
+        resolve();
+      };
 
-    await requestToPromise(docStore.delete(id));
-    if (doc.ownsFile !== false && doc.fileId) {
-      await requestToPromise(tx.objectStore(STORES.files).delete(doc.fileId));
-    }
+      const getRequest = docStore.get(id);
+      getRequest.onerror = () => reject(getRequest.error);
+      getRequest.onsuccess = () => {
+        const doc = getRequest.result;
+        if (!doc) {
+          resolve();
+          return;
+        }
+        if (doc.kind !== DOCUMENT_KIND.parent) {
+          finish(doc);
+          return;
+        }
+        const childRequest = docStore.index('parentId').getAll(id);
+        childRequest.onerror = () => reject(childRequest.error);
+        childRequest.onsuccess = () => {
+          for (const child of childRequest.result || []) docStore.delete(child.id);
+          finish(doc);
+        };
+      };
+    });
   });
 }

@@ -11,7 +11,7 @@ import { ProviderSettingsDialog } from '@/components/provider/ProviderSettingsDi
 import { Sidebar } from '@/components/layout/Sidebar';
 import { useAppState } from '@/hooks/useAppState';
 import { requestPersistentStorage } from '@/hooks/useStorageEstimate';
-import { errorHint, userMessage, toAppError } from '@/lib/errors';
+import { errorDetail, errorHint, userMessage, toAppError } from '@/lib/errors';
 import { downloadExport } from '@/lib/export/exporter';
 import { deleteAllLocalData } from '@/lib/workflows';
 import { isProviderConfigured } from '@/lib/providers/validation';
@@ -43,6 +43,18 @@ function Notice({ notice, onDismiss }) {
               <span className="mt-1 block text-[13px] text-danger/85">
                 {errorHint(notice.error)}
               </span>
+            ) : null}
+            {/* Without this the underlying DOMException is discarded, and a
+                storage failure gives the user nothing to report or act on. */}
+            {errorDetail(notice.error) ? (
+              <details className="mt-1.5">
+                <summary className="cursor-pointer text-[12px] text-danger/80 underline underline-offset-2">
+                  Technical details
+                </summary>
+                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded border border-danger-edge/60 bg-panel/60 p-2 text-[11px] leading-relaxed text-ink-muted">
+                  {errorDetail(notice.error)}
+                </pre>
+              </details>
             ) : null}
           </>
         ) : (

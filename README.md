@@ -1,6 +1,11 @@
 # Simple OCR
 
+[![CI](https://github.com/sadeghhp/simple-ocr/actions/workflows/ci.yml/badge.svg)](https://github.com/sadeghhp/simple-ocr/actions/workflows/ci.yml)
+[![Deploy](https://github.com/sadeghhp/simple-ocr/actions/workflows/pages.yml/badge.svg)](https://github.com/sadeghhp/simple-ocr/actions/workflows/pages.yml)
+
 A private, browser-only OCR workspace. Upload documents, store them in your browser, send them to your own LLM provider for text extraction, and edit the results — all without a backend.
+
+**Live demo:** [sadeghhp.github.io/simple-ocr](https://sadeghhp.github.io/simple-ocr/)
 
 Full product spec: [docs/Browser-Only OCR Document Application.md](docs/Browser-Only%20OCR%20Document%20Application.md)
 
@@ -21,7 +26,14 @@ npm test           # vitest suite
 npm run build      # static export to out/
 ```
 
-Deploy by serving the `out/` directory from any static host.
+Deploy by serving the `out/` directory from any static host. GitHub Pages deploys automatically on push to `main` (see `.github/workflows/pages.yml`).
+
+To test a GitHub Pages build locally:
+
+```bash
+GITHUB_PAGES=true npm run build && npx serve out
+# open http://localhost:3000/simple-ocr/
+```
 
 ## Architecture
 

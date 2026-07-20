@@ -88,7 +88,15 @@ export function toAppError(err, fallbackCode = ERROR_CODES.UNKNOWN) {
   if (err && (err.name === 'QuotaExceededError' || err.code === 22)) {
     return new AppError(ERROR_CODES.STORAGE_QUOTA_EXCEEDED, message, { cause: err });
   }
-  return new AppError(fallbackCode, message, { cause: err });
+  // Keep the DOMException name. IndexedDB failures are distinguished almost
+  // entirely by name — TransactionInactiveError, NotFoundError,
+  // ConstraintError — and several browsers leave the message blank, so
+  // dropping it leaves a storage failure with nothing to diagnose from.
+  const name = err?.name && err.name !== 'Error' ? err.name : null;
+  return new AppError(fallbackCode, message || name || 'Unknown failure', {
+    cause: err,
+    detail: name ? `${name}${message ? `: ${message}` : ''}` : null,
+  });
 }
 
 const USER_MESSAGES = {
