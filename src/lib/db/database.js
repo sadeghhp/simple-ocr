@@ -6,7 +6,9 @@ import { AppError, ERROR_CODES, toAppError } from '@/lib/errors';
 import { SCHEMA_VERSION, migrateDocumentRecord } from '@/lib/db/migrations';
 
 export const DB_NAME = 'simple-ocr';
-export const DB_VERSION = 2;
+// v3 repairs missing indexes; the record shape is unchanged, so SCHEMA_VERSION
+// stays at 2. Database version and record version move independently.
+export const DB_VERSION = 3;
 export { SCHEMA_VERSION };
 
 export const STORES = {
@@ -19,6 +21,25 @@ let dbPromise = null;
 // Kept alongside the promise so the connection can be closed synchronously —
 // deleteDatabase() is otherwise blocked by our own still-open connection.
 let dbInstance = null;
+
+/** Create an index only when it is absent, so a migration can safely re-run. */
+function ensureIndex(store, name, keyPath) {
+  if (!store.indexNames.contains(name)) store.createIndex(name, keyPath);
+}
+
+/**
+ * Indexes the current code depends on. Applied by every migration from v2
+ * onward rather than only when introduced: a database was observed in the wild
+ * at version 2 with these missing, which made every child lookup throw
+ * NotFoundError. Re-asserting them is cheap and repairs that state.
+ */
+function ensureDocumentIndexes(documents) {
+  // IndexedDB skips records whose key path resolves to null, so roots
+  // (parentId: null) are simply absent from these indexes — which makes
+  // `index.getAll(parentId)` an exact child lookup with no sentinel value.
+  ensureIndex(documents, 'parentId', 'parentId');
+  ensureIndex(documents, 'parentPage', ['parentId', 'pageNumber']);
+}
 
 /**
  * Versioned upgrade path. Migrations must be additive and never delete
@@ -42,11 +63,7 @@ function upgrade(db, oldVersion, tx) {
     // v2: multi-page documents. A PDF becomes a parent record plus one child
     // per page, so every page carries its own status and extraction.
     const documents = tx.objectStore(STORES.documents);
-    // IndexedDB skips records whose key path resolves to null, so roots
-    // (parentId: null) are simply absent from these indexes — which makes
-    // `index.getAll(parentId)` an exact child lookup with no sentinel value.
-    documents.createIndex('parentId', 'parentId');
-    documents.createIndex('parentPage', ['parentId', 'pageNumber']);
+    ensureDocumentIndexes(documents);
 
     // Backfill the new fields onto existing records. Cursor-based so it stays
     // inside the versionchange transaction and cannot half-apply.
@@ -57,6 +74,13 @@ function upgrade(db, oldVersion, tx) {
       cursor.update(migrateDocumentRecord(cursor.value));
       cursor.continue();
     };
+  }
+
+  if (oldVersion < 3) {
+    // v3 adds no fields. It exists purely to repair databases that reached v2
+    // without the indexes — without a version bump there is no opportunity to
+    // create them, since createIndex is only legal during an upgrade.
+    ensureDocumentIndexes(tx.objectStore(STORES.documents));
   }
 }
 

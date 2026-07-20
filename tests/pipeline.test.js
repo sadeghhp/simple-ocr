@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AppError, ERROR_CODES } from '@/lib/errors';
 import { createMutex, runPool } from '@/lib/pipeline/pool';
-import { deriveParentStatus, joinPageText, summarizePages } from '@/lib/pipeline/status';
+import {
+  deriveParentError,
+  deriveParentStatus,
+  joinPageText,
+  summarizePages,
+} from '@/lib/pipeline/status';
 
 const page = (status, extra = {}) => ({ status, pageNumber: 1, ...extra });
 
@@ -86,6 +91,24 @@ describe('runPool', () => {
       { concurrency: 3 }
     );
     expect(peak).toBeLessThanOrEqual(3);
+  });
+
+  it('sends one item at a time by default', async () => {
+    // Serial by default: parallel bursts draw 429s, and a gateway behind bot
+    // protection can answer a burst with a challenge carrying no CORS headers,
+    // which the browser reports as an opaque network failure.
+    let active = 0;
+    let peak = 0;
+    await runPool(
+      [1, 2, 3, 4],
+      async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 3));
+        active -= 1;
+      }
+    );
+    expect(peak).toBe(1);
   });
 
   it('isolates a failure so the remaining items still run', async () => {
@@ -198,5 +221,69 @@ describe('createMutex', () => {
     await expect(failed).rejects.toThrow('render failed');
     // One bad page must not deadlock every page behind it.
     await expect(runExclusive(async () => 'ok')).resolves.toBe('ok');
+  });
+});
+
+describe('deriveParentError', () => {
+  const failedPage = (code, message, extra = {}) => ({
+    status: 'failed',
+    processingError: {
+      code,
+      message,
+      detail: `detail for ${code}`,
+      hint: `hint for ${code}`,
+      retryable: true,
+      createdAt: '2026-07-20T00:00:00.000Z',
+      ...extra,
+    },
+  });
+
+  it('returns null when nothing failed', () => {
+    expect(deriveParentError([page('completed'), page('completed')])).toBeNull();
+    expect(deriveParentError([])).toBeNull();
+  });
+
+  it('propagates the real cause when every page failed the same way', () => {
+    // The reported bug: 10 of 10 pages blocked by CORS were reported as
+    // "some pages could not be extracted", hiding the only useful information
+    // and suggesting a retry that could not possibly work.
+    const pages = Array.from({ length: 10 }, () =>
+      failedPage('NETWORK_ERROR', 'Failed to fetch')
+    );
+    const error = deriveParentError(pages);
+
+    expect(error.code).toBe('NETWORK_ERROR');
+    expect(error.message).toContain('Every page failed');
+    expect(error.message).toContain('Failed to fetch');
+    expect(error.hint).toBe('hint for NETWORK_ERROR');
+    expect(error.detail).toBe('detail for NETWORK_ERROR');
+  });
+
+  it('reports a partial failure when some pages succeeded', () => {
+    const error = deriveParentError([
+      page('completed'),
+      page('completed'),
+      failedPage('AUTHENTICATION_FAILED', 'bad key'),
+    ]);
+    expect(error.code).toBe('PAGE_PARTIAL_FAILURE');
+    expect(error.message).toBe('1 of 3 pages failed');
+    expect(error.hint).toContain('2 pages extracted');
+  });
+
+  it('falls back to the generic message when pages failed for different reasons', () => {
+    const error = deriveParentError([
+      failedPage('NETWORK_ERROR', 'Failed to fetch'),
+      failedPage('RATE_LIMITED', 'slow down'),
+    ]);
+    expect(error.code).toBe('PAGE_PARTIAL_FAILURE');
+    expect(error.hint).toContain('retry the pages that failed');
+    // Both underlying reasons stay available in the details.
+    expect(error.detail).toContain('NETWORK_ERROR');
+    expect(error.detail).toContain('RATE_LIMITED');
+  });
+
+  it('still reports a failure when a page has no error record', () => {
+    const error = deriveParentError([{ status: 'failed', processingError: null }]);
+    expect(error.code).toBe('PAGE_PARTIAL_FAILURE');
   });
 });

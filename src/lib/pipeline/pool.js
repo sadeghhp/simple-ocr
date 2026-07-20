@@ -1,14 +1,17 @@
 /**
  * Bounded-concurrency worker pool for page processing.
  *
- * The limiter here is the provider's rate limit, not the CPU. A 100-page PDF
- * fired off ten at a time will collect 429s on most accounts, and every 429
- * costs a full page re-render on retry — so the pool starts narrow and gets
- * narrower rather than backing off blindly.
+ * The limiter here is the provider, not the CPU. Pages are sent one at a time
+ * by default: a burst of parallel requests collects 429s on most accounts, and
+ * gateways behind bot protection (OpenRouter sits behind Cloudflare) can answer
+ * a burst with a challenge page that carries no CORS headers — which the
+ * browser reports as an opaque network failure rather than a rate limit.
+ * Serial is slower and far more predictable, and a page that does hit a limit
+ * still narrows the pool and retries.
  */
 import { ERROR_CODES } from '@/lib/errors';
 
-export const DEFAULT_CONCURRENCY = 3;
+export const DEFAULT_CONCURRENCY = 1;
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

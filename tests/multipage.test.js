@@ -191,6 +191,28 @@ describe('processing a multi-page document', () => {
     expect(updated.extractedText).toContain('--- Page 1 ---');
   });
 
+  it('surfaces the real cause when every page fails the same way', async () => {
+    await saveProviderConfig(validConfig());
+    const parent = await uploadFile(pdfFile());
+
+    // Every page blocked identically — the shape of a CORS rejection or a bad
+    // key. The document must report that reason, not a vague page failure.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async () => {
+        throw new TypeError('Failed to fetch');
+      })
+    );
+
+    const updated = await processDocument(parent.id);
+
+    expect(updated.status).toBe('failed');
+    expect(updated.processingError.code).toBe('NETWORK_ERROR');
+    expect(updated.processingError.message).toContain('Every page failed');
+    // The actionable guidance from the underlying error must survive.
+    expect(updated.processingError.hint).toMatch(/CORS|connection/i);
+  });
+
   it('retries a single failed page without touching its siblings', async () => {
     await saveProviderConfig(validConfig());
     const parent = await uploadFile(pdfFile());

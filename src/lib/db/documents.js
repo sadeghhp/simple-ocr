@@ -113,13 +113,38 @@ export async function listRootDocuments() {
   return docs.filter((doc) => !doc.parentId);
 }
 
+/**
+ * Request the children of `parentId` from an open store.
+ *
+ * Falls back to scanning when the `parentId` index is absent. A database was
+ * found in the wild at v2 with the index missing, and every child lookup threw
+ * NotFoundError — including deletion, which then aborted its transaction. The
+ * index is an optimisation over a store holding metadata only; correctness must
+ * not depend on it existing.
+ */
+function requestChildren(store, parentId) {
+  if (store.indexNames.contains('parentId')) {
+    return { request: store.index('parentId').getAll(parentId), filtered: true };
+  }
+  return { request: store.getAll(), filtered: false };
+}
+
+const byPageNumber = (a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0);
+
 /** Pages of one parent, in page order. */
 export async function listChildDocuments(parentId) {
   if (!parentId) return [];
-  const docs = await withTransaction([STORES.documents], 'readonly', (tx) =>
-    requestToPromise(tx.objectStore(STORES.documents).index('parentId').getAll(parentId))
-  );
-  return (docs || []).sort((a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0));
+  const { docs, filtered } = await withTransaction([STORES.documents], 'readonly', async (tx) => {
+    const { request, filtered: usedIndex } = requestChildren(
+      tx.objectStore(STORES.documents),
+      parentId
+    );
+    return { docs: await requestToPromise(request), filtered: usedIndex };
+  });
+  const children = filtered
+    ? docs || []
+    : (docs || []).filter((doc) => doc.parentId === parentId);
+  return children.sort(byPageNumber);
 }
 
 /**
@@ -179,10 +204,14 @@ export function deleteDocumentTree(id) {
           finish(doc);
           return;
         }
-        const childRequest = docStore.index('parentId').getAll(id);
+        // Tolerates a missing parentId index — see requestChildren.
+        const { request: childRequest, filtered } = requestChildren(docStore, id);
         childRequest.onerror = () => reject(childRequest.error);
         childRequest.onsuccess = () => {
-          for (const child of childRequest.result || []) docStore.delete(child.id);
+          const children = filtered
+            ? childRequest.result || []
+            : (childRequest.result || []).filter((child) => child.parentId === id);
+          for (const child of children) docStore.delete(child.id);
           finish(doc);
         };
       };

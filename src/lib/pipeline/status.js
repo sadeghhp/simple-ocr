@@ -5,6 +5,7 @@
  * this is the logic a tab closed mid-run is most likely to corrupt.
  */
 import { DOCUMENT_STATUS } from '@/lib/db/documents';
+import { ERROR_CODES } from '@/lib/errors';
 
 /**
  * @param {Array<{status: string}>} children
@@ -37,6 +38,50 @@ export function summarizePages(children) {
     completed: pages.filter((p) => p.status === DOCUMENT_STATUS.completed).length,
     failed: pages.filter((p) => p.status === DOCUMENT_STATUS.failed).length,
     processing: pages.filter((p) => p.status === DOCUMENT_STATUS.processing).length,
+  };
+}
+
+/**
+ * The error to store on a parent, derived from its pages.
+ *
+ * When every page failed the same way, the parent reports that failure
+ * verbatim. Replacing it with a generic "some pages could not be extracted"
+ * throws away the only actionable information there is — a CORS rejection or a
+ * bad API key gets reported as a vague page problem, and the suggested fix
+ * ("retry the failed pages") is guaranteed to fail the same way.
+ *
+ * @param {Array} children
+ * @returns {object|null} a persisted error record, or null when nothing failed
+ */
+export function deriveParentError(children) {
+  const pages = Array.isArray(children) ? children : [];
+  const failed = pages.filter((p) => p.status === DOCUMENT_STATUS.failed);
+  if (failed.length === 0) return null;
+
+  const errors = failed.map((p) => p.processingError).filter(Boolean);
+  const codes = new Set(errors.map((e) => e.code));
+
+  // Every page failed, and for one shared reason: that reason IS the document's.
+  if (failed.length === pages.length && codes.size === 1 && errors.length > 0) {
+    const shared = errors[0];
+    return {
+      ...shared,
+      message: `Every page failed: ${shared.message}`,
+    };
+  }
+
+  const completed = pages.filter((p) => p.status === DOCUMENT_STATUS.completed).length;
+  const sharedCode = codes.size === 1 ? [...codes][0] : null;
+  return {
+    code: ERROR_CODES.PAGE_PARTIAL_FAILURE,
+    message: `${failed.length} of ${pages.length} pages failed`,
+    detail: errors.length > 0 ? errors.map((e) => e.detail || e.message).join('\n') : null,
+    hint: sharedCode
+      ? `${completed} ${completed === 1 ? 'page' : 'pages'} extracted. The rest failed the same way — open a failed page for the reason.`
+      : 'Open the document and retry the pages that failed.',
+    retryable: true,
+    documentId: null,
+    createdAt: new Date().toISOString(),
   };
 }
 

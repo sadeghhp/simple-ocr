@@ -23,7 +23,7 @@ import { deleteDatabase } from '@/lib/db/database';
 import { MAX_PDF_PAGES, getPageCount, openDocument } from '@/lib/pdf/render';
 import { invalidateFile } from '@/lib/pdf/cache';
 import { DEFAULT_CONCURRENCY, createMutex, runPool } from '@/lib/pipeline/pool';
-import { deriveParentStatus, joinPageText } from '@/lib/pipeline/status';
+import { deriveParentError, deriveParentStatus, joinPageText } from '@/lib/pipeline/status';
 
 /**
  * Validate and store one uploaded file: blob first, then the metadata
@@ -303,16 +303,9 @@ export async function refreshParentStatus(parentId) {
     extractedText: text || current.extractedText,
     editedText: text || current.editedText,
     pageCount: children.length,
-    processingError:
-      status === DOCUMENT_STATUS.failed || status === DOCUMENT_STATUS.partial
-        ? new AppError(
-            ERROR_CODES.PAGE_PARTIAL_FAILURE,
-            `${children.filter((c) => c.status === DOCUMENT_STATUS.failed).length} of ${
-              children.length
-            } pages failed`,
-            { retryable: true, documentId: parentId }
-          ).toRecord()
-        : null,
+    // Derived, so a document whose pages all failed for one reason reports
+    // that reason rather than burying it behind a generic page-failure notice.
+    processingError: deriveParentError(children),
   })).catch(() => null);
 }
 
