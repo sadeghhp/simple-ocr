@@ -1,0 +1,68 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, 'SF Mono', 'Cascadia Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
+
+  /* Neutral surfaces */
+  --color-surface: #f7f7f8;
+  --color-panel: #ffffff;
+  --color-panel-muted: #fafafa;
+  --color-edge: #e4e4e7;
+  --color-edge-strong: #d4d4d8;
+
+  /* Text */
+  --color-ink: #18181b;
+  --color-ink-muted: #52525b;
+  --color-ink-faint: #a1a1aa;
+
+  /* Accent */
+  --color-accent: #4338ca;
+  --color-accent-hover: #3730a3;
+  --color-accent-soft: #eef2ff;
+  --color-accent-edge: #c7d2fe;
+
+  /* Semantic */
+  --color-success: #15803d;
+  --color-success-soft: #f0fdf4;
+  --color-success-edge: #bbf7d0;
+  --color-warning: #a16207;
+  --color-warning-soft: #fefce8;
+  --color-warning-edge: #fde68a;
+  --color-danger: #b91c1c;
+  --color-danger-soft: #fef2f2;
+  --color-danger-edge: #fecaca;
+
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent-hover);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
