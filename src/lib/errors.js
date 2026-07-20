@@ -29,6 +29,15 @@ export const ERROR_CODES = {
   IMPORT_INVALID: 'IMPORT_INVALID',
   ALREADY_PROCESSING: 'ALREADY_PROCESSING',
   PROCESSING_INTERRUPTED: 'PROCESSING_INTERRUPTED',
+  PROCESSING_CANCELLED: 'PROCESSING_CANCELLED',
+  EXTRACTION_NOT_JSON: 'EXTRACTION_NOT_JSON',
+  EXTRACTION_TRUNCATED: 'EXTRACTION_TRUNCATED',
+  EXTRACTION_SCHEMA_MISMATCH: 'EXTRACTION_SCHEMA_MISMATCH',
+  PDF_RENDER_FAILED: 'PDF_RENDER_FAILED',
+  PDF_ENCRYPTED: 'PDF_ENCRYPTED',
+  PDF_NO_PAGES: 'PDF_NO_PAGES',
+  PDF_TOO_MANY_PAGES: 'PDF_TOO_MANY_PAGES',
+  PAGE_PARTIAL_FAILURE: 'PAGE_PARTIAL_FAILURE',
   NOT_FOUND: 'NOT_FOUND',
   UNKNOWN: 'UNKNOWN',
 };
@@ -122,6 +131,18 @@ const USER_MESSAGES = {
   ALREADY_PROCESSING: 'This document is already being processed.',
   PROCESSING_INTERRUPTED:
     'Processing stopped when the app was closed or reloaded. Your file is still stored safely.',
+  PROCESSING_CANCELLED: 'Processing was cancelled. Your file is still stored safely.',
+  EXTRACTION_NOT_JSON:
+    'The model returned text but not structured data. The text was kept — only the fields are missing.',
+  EXTRACTION_TRUNCATED:
+    'The model’s reply was cut off, so some fields may be incomplete. The text that arrived was kept.',
+  EXTRACTION_SCHEMA_MISMATCH:
+    'The model returned structured data in an unexpected shape. The text was kept.',
+  PDF_RENDER_FAILED: 'This PDF page could not be rendered. Your file is still stored safely.',
+  PDF_ENCRYPTED: 'This PDF is password-protected, so its pages cannot be read.',
+  PDF_NO_PAGES: 'This PDF contains no pages.',
+  PDF_TOO_MANY_PAGES: 'This PDF has more pages than the app will process in one document.',
+  PAGE_PARTIAL_FAILURE: 'Some pages of this document could not be extracted.',
   NOT_FOUND: 'The requested record no longer exists.',
   UNKNOWN: 'Something went wrong.',
 };
@@ -152,6 +173,17 @@ const DEFAULT_HINTS = {
     'Check your connection, then confirm the endpoint allows browser requests (CORS).',
   CORS_BLOCKED: 'The provider must send Access-Control-Allow-Origin for browser requests.',
   STORAGE_QUOTA_EXCEEDED: 'Export your data, then delete documents you no longer need.',
+  EXTRACTION_NOT_JSON:
+    'Press Retry to try again. If it keeps happening, this model may not follow JSON instructions well — try a different one in Settings.',
+  EXTRACTION_TRUNCATED:
+    'This usually means a long page hit the model’s output limit. Retry, or try a model with a larger output budget.',
+  EXTRACTION_SCHEMA_MISMATCH: 'Press Retry, or switch to a different model in Settings.',
+  PDF_ENCRYPTED: 'Remove the password from the PDF, then upload it again.',
+  PDF_RENDER_FAILED:
+    'The PDF may be damaged. Try opening it in another viewer and re-saving it.',
+  PDF_TOO_MANY_PAGES: 'Split the PDF into smaller files and upload them separately.',
+  PAGE_PARTIAL_FAILURE: 'Open the document and retry the pages that failed.',
+  PROCESSING_CANCELLED: 'Press Extract text to start again.',
 };
 
 /** Map an AppError (or persisted error record) to a user-facing headline. */

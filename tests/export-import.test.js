@@ -2,7 +2,7 @@
 import JSZip from 'jszip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDatabase, deleteDatabase } from '@/lib/db/database';
-import { listDocuments } from '@/lib/db/documents';
+import { listAllDocuments } from '@/lib/db/documents';
 import { listFiles } from '@/lib/db/files';
 import { buildExportBlob, buildManifest } from '@/lib/export/exporter';
 import { parseArchive, restoreArchive, validateManifest } from '@/lib/export/importer';
@@ -115,7 +115,7 @@ describe('export → import round trip', () => {
     const { imported } = await restoreArchive(parsed);
     expect(imported).toBe(1);
 
-    const docs = await listDocuments();
+    const docs = await listAllDocuments();
     expect(docs).toHaveLength(1);
     expect(docs[0].name).toBe('roundtrip.png');
     expect(docs[0].id).toBe(doc.id);
@@ -129,7 +129,7 @@ describe('export → import round trip', () => {
     const { blob } = await buildExportBlob();
     const parsed = await parseArchive(blob);
     await restoreArchive(parsed);
-    const docs = await listDocuments();
+    const docs = await listAllDocuments();
     expect(docs).toHaveLength(2);
     expect(new Set(docs.map((d) => d.id)).size).toBe(2);
     expect(new Set(docs.map((d) => d.fileId)).size).toBe(2);

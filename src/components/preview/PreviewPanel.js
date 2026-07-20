@@ -27,10 +27,11 @@ function PdfPreview({ url, name }) {
     <iframe
       src={url}
       title={`Preview of ${name}`}
-      // A blob: URL inherits this page's origin. `allow-scripts` WITHOUT
-      // `allow-same-origin` gives the frame an opaque origin: the built-in PDF
-      // viewer still runs, but a stored file cannot reach local data.
-      sandbox="allow-scripts"
+      // No `sandbox`: Chrome refuses to load its built-in PDF viewer in an
+      // opaque-origin frame ("This page has been blocked by Chrome"), and
+      // `allow-scripts allow-same-origin` on a same-origin blob: URL is a
+      // sandbox the frame can escape anyway. The blob is the user's own file
+      // and never leaves the browser.
       className="h-full w-full border-0 bg-white"
     />
   );

@@ -3,10 +3,11 @@
  * this module — UI code must never open its own (spec §6.3, §27).
  */
 import { AppError, ERROR_CODES, toAppError } from '@/lib/errors';
+import { SCHEMA_VERSION, migrateDocumentRecord } from '@/lib/db/migrations';
 
 export const DB_NAME = 'simple-ocr';
-export const DB_VERSION = 1;
-export const SCHEMA_VERSION = 1;
+export const DB_VERSION = 2;
+export { SCHEMA_VERSION };
 
 export const STORES = {
   documents: 'documents',
@@ -22,8 +23,11 @@ let dbInstance = null;
 /**
  * Versioned upgrade path. Migrations must be additive and never delete
  * user data (spec §27). Each `if (oldVersion < N)` block is one migration.
+ *
+ * `tx` is the versionchange transaction — the only way to reach an existing
+ * store to add an index or rewrite records.
  */
-function upgrade(db, oldVersion) {
+function upgrade(db, oldVersion, tx) {
   if (oldVersion < 1) {
     const documents = db.createObjectStore(STORES.documents, { keyPath: 'id' });
     documents.createIndex('createdAt', 'createdAt');
@@ -32,6 +36,27 @@ function upgrade(db, oldVersion) {
 
     db.createObjectStore(STORES.files, { keyPath: 'id' });
     db.createObjectStore(STORES.settings, { keyPath: 'key' });
+  }
+
+  if (oldVersion < 2) {
+    // v2: multi-page documents. A PDF becomes a parent record plus one child
+    // per page, so every page carries its own status and extraction.
+    const documents = tx.objectStore(STORES.documents);
+    // IndexedDB skips records whose key path resolves to null, so roots
+    // (parentId: null) are simply absent from these indexes — which makes
+    // `index.getAll(parentId)` an exact child lookup with no sentinel value.
+    documents.createIndex('parentId', 'parentId');
+    documents.createIndex('parentPage', ['parentId', 'pageNumber']);
+
+    // Backfill the new fields onto existing records. Cursor-based so it stays
+    // inside the versionchange transaction and cannot half-apply.
+    const cursorRequest = documents.openCursor();
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return;
+      cursor.update(migrateDocumentRecord(cursor.value));
+      cursor.continue();
+    };
   }
 }
 
@@ -43,7 +68,8 @@ export function openDatabase() {
       return;
     }
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (event) => upgrade(request.result, event.oldVersion);
+    request.onupgradeneeded = (event) =>
+      upgrade(request.result, event.oldVersion, request.transaction);
     request.onsuccess = () => {
       const db = request.result;
       dbInstance = db;

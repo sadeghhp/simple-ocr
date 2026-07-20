@@ -5,7 +5,7 @@
  * Provider credentials are never included.
  */
 import JSZip from 'jszip';
-import { listDocuments } from '@/lib/db/documents';
+import { listAllDocuments } from '@/lib/db/documents';
 import { listFiles } from '@/lib/db/files';
 
 export const EXPORT_VERSION = 1;
@@ -30,7 +30,9 @@ export function buildManifest(documents, files, { now = new Date().toISOString()
 }
 
 export async function buildExportBlob() {
-  const [documents, files] = await Promise.all([listDocuments(), listFiles()]);
+  // Every document including child pages. Exporting roots only would lose
+  // every page of every multi-page document, silently.
+  const [documents, files] = await Promise.all([listAllDocuments(), listFiles()]);
   const manifest = buildManifest(documents, files);
   const zip = new JSZip();
   zip.file('manifest.json', JSON.stringify(manifest, null, 2));

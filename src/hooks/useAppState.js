@@ -13,7 +13,9 @@ import {
   useRef,
   useState,
 } from 'react';
-import { listDocuments } from '@/lib/db/documents';
+// Still the flat list: the sidebar moves to listRootDocuments() + a children
+// map when it learns to render nested pages.
+import { listAllDocuments } from '@/lib/db/documents';
 import { toAppError } from '@/lib/errors';
 import {
   deleteDocument,
@@ -45,7 +47,7 @@ export function AppStateProvider({ children }) {
 
   const refreshDocuments = useCallback(async () => {
     try {
-      const docs = await listDocuments();
+      const docs = await listAllDocuments();
       if (!mounted.current) return docs;
       setDocuments(docs);
       setDocumentsLoaded(true);

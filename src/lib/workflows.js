@@ -6,9 +6,9 @@ import { ERROR_CODES, AppError, toAppError } from '@/lib/errors';
 import {
   DOCUMENT_STATUS,
   createDocumentRecord,
-  deleteDocumentAndFile,
+  deleteDocumentTree,
   getDocument,
-  listDocuments,
+  listAllDocuments,
   putDocument,
   updateDocument,
 } from '@/lib/db/documents';
@@ -73,7 +73,9 @@ const inFlight = new Set();
  * has no owner after a reload and would otherwise disable the document forever.
  */
 export async function reconcileInterruptedProcessing() {
-  const docs = await listDocuments();
+  // Must be the full list, not roots only — a stuck child page has no other
+  // owner and would stay disabled forever.
+  const docs = await listAllDocuments();
   const stuck = docs.filter(
     (doc) => doc.status === DOCUMENT_STATUS.processing && !inFlight.has(doc.id)
   );
@@ -165,7 +167,7 @@ export function resetEditedText(documentId) {
 
 /** Delete a document and every related record (spec §4.11). */
 export function deleteDocument(documentId) {
-  return deleteDocumentAndFile(documentId);
+  return deleteDocumentTree(documentId);
 }
 
 export function saveProviderConfig(config) {

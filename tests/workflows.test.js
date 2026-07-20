@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { closeDatabase, deleteDatabase } from '@/lib/db/database';
-import { getDocument, listDocuments, updateDocument } from '@/lib/db/documents';
+import { SCHEMA_VERSION, closeDatabase, deleteDatabase } from '@/lib/db/database';
+import { getDocument, listAllDocuments, updateDocument } from '@/lib/db/documents';
 import { getFile, listFiles } from '@/lib/db/files';
 import {
   deleteDocument,
@@ -40,7 +40,7 @@ describe('upload workflow', () => {
   it('stores the blob and creates a ready document record', async () => {
     const doc = await uploadFile(makeFile());
     expect(doc.status).toBe('ready');
-    expect(doc.schemaVersion).toBe(1);
+    expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
 
     const stored = await getDocument(doc.id);
     expect(stored.name).toBe('scan.png');
@@ -193,7 +193,7 @@ describe('deleteDocument', () => {
     await deleteDocument(doc.id);
     expect(await getDocument(doc.id)).toBeNull();
     expect(await getFile(doc.fileId)).toBeNull();
-    expect(await listDocuments()).toHaveLength(0);
+    expect(await listAllDocuments()).toHaveLength(0);
     expect(await listFiles()).toHaveLength(0);
   });
 });
