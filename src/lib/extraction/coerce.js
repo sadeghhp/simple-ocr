@@ -157,6 +157,10 @@ export function coerceExtraction(raw, { fallbackText = null } = {}) {
   return {
     extraction: {
       documentType,
+      // A one-line human title, used to rename the document once it lands.
+      // Not a template field: it applies to every type, so it stays top level
+      // rather than being declared eight times over.
+      subject: coerceScalar(source.subject),
       confidence,
       language: coerceScalar(source.language),
       fields,
@@ -177,6 +181,7 @@ export function coerceExtraction(raw, { fallbackText = null } = {}) {
 export function degradedExtraction(text) {
   return {
     documentType: FALLBACK_TEMPLATE_ID,
+    subject: null,
     confidence: null,
     language: null,
     fields: {},

@@ -4,7 +4,8 @@
  */
 import { AppError, ERROR_CODES } from '@/lib/errors';
 import { SCHEMA_VERSION, STORES, requestToPromise, withTransaction } from '@/lib/db/database';
-import { DOCUMENT_KIND, v2Defaults } from '@/lib/db/migrations';
+import { DOCUMENT_KIND, v2Defaults, v3Defaults } from '@/lib/db/migrations';
+import { pageDisplayName } from '@/lib/naming';
 
 export { DOCUMENT_KIND };
 
@@ -22,9 +23,12 @@ export function createDocumentRecord({ id, fileId, name, mimeType, size, kind, p
   const now = new Date().toISOString();
   return {
     ...v2Defaults(),
+    ...v3Defaults(),
     id,
     fileId,
     name,
+    // What the user uploaded. `name` may later become the extracted subject.
+    originalName: name,
     mimeType,
     size,
     createdAt: now,
@@ -56,11 +60,16 @@ export function createDocumentRecord({ id, fileId, name, mimeType, size, kind, p
  */
 export function createPageRecord({ id, parent, pageNumber }) {
   const now = new Date().toISOString();
+  const displayName = pageDisplayName(parent.name, pageNumber);
   return {
     ...v2Defaults(),
+    ...v3Defaults(),
     id,
     fileId: parent.fileId,
-    name: `${parent.name} — page ${pageNumber}`,
+    name: displayName,
+    // A page's name always follows its parent's, so renaming the parent
+    // re-derives both — the page has no original of its own to restore.
+    originalName: pageDisplayName(parent.originalName ?? parent.name, pageNumber),
     mimeType: parent.mimeType,
     size: 0,
     createdAt: now,

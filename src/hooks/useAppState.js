@@ -24,6 +24,8 @@ import {
   loadProviderConfig,
   processDocument,
   reconcileInterruptedProcessing,
+  renameDocument,
+  restoreOriginalName,
   saveProviderConfig,
   uploadFiles,
 } from '@/lib/workflows';
@@ -150,6 +152,30 @@ export function AppStateProvider({ children }) {
     [refreshDocuments]
   );
 
+  // Renaming touches child page names too, so the whole list is refreshed
+  // rather than the single record patched in place.
+  const rename = useCallback(
+    async (documentId, name) => {
+      try {
+        await renameDocument(documentId, name);
+        return null;
+      } catch (err) {
+        return toAppError(err);
+      } finally {
+        await refreshDocuments();
+      }
+    },
+    [refreshDocuments]
+  );
+
+  const restoreName = useCallback(
+    async (documentId) => {
+      await restoreOriginalName(documentId).catch(() => {});
+      await refreshDocuments();
+    },
+    [refreshDocuments]
+  );
+
   const saveProvider = useCallback(async (config) => {
     await saveProviderConfig(config);
     setProviderConfig(config);
@@ -195,6 +221,8 @@ export function AppStateProvider({ children }) {
       process,
       cancel,
       remove,
+      rename,
+      restoreName,
       saveProvider,
     }),
     [
@@ -212,6 +240,8 @@ export function AppStateProvider({ children }) {
       process,
       cancel,
       remove,
+      rename,
+      restoreName,
       saveProvider,
     ]
   );

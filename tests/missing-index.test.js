@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DB_NAME,
   DB_VERSION,
+  SCHEMA_VERSION,
   STORES,
   closeDatabase,
   deleteDatabase,
@@ -162,12 +163,16 @@ describe('child lookups without any index at all', () => {
 });
 
 describe('database versioning', () => {
-  it('bumps the database version without changing the record schema', async () => {
+  it('moves the database and record versions independently', async () => {
     await listChildDocuments('parent-1');
     const doc = await getDocument('parent-1');
-    // v3 adds no fields; only the index repair justified the bump.
-    expect(DB_VERSION).toBe(3);
-    expect(doc.schemaVersion).toBe(2);
+    // The two versions are not locked together: DB v3 was an index repair that
+    // changed no records, DB v4 carries record schema v3. What must hold is
+    // that opening a stale database brings its records fully up to date —
+    // record migration only ever runs inside a versionchange transaction.
+    expect(DB_VERSION).toBeGreaterThan(SCHEMA_VERSION);
+    expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(doc.originalName).toBe(doc.name);
   });
 });
 

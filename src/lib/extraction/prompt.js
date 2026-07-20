@@ -67,6 +67,7 @@ ${extract}
 
 Return a single JSON object with these keys, in this order:
   documentType  one of the type ids above
+  subject       a short human title for this page, 3-8 words, or null
   confidence    number 0-1, how certain the classification is
   language      BCP-47 code of the page's main language, or null
   fields        an object holding the fields for your chosen type
@@ -75,6 +76,11 @@ Return a single JSON object with these keys, in this order:
 
 Rules:
 - Return only the JSON object. No prose before or after it, no markdown fences.
+- subject names what the page *is*, using only words printed on it — the issuer,
+  the counterparty, an identifying number. "Acme Corp Invoice 4471" or
+  "Berlin Tenancy Agreement". No file extension, no date-only titles, no
+  punctuation that cannot appear in a filename. Use null rather than inventing
+  one when the page has no clear subject.
 - rawText is mandatory and must be the complete text of the page, even when the
   page fits a type well. It is what the user reads and edits.
 - Use null for any field you cannot find on the page. Never invent a value and

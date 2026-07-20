@@ -2,7 +2,7 @@
 // Node for the same reason as tests/multipage.test.js: a jsdom Blob does not
 // survive fake-indexeddb's structured clone.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { closeDatabase, deleteDatabase } from '@/lib/db/database';
+import { SCHEMA_VERSION, closeDatabase, deleteDatabase } from '@/lib/db/database';
 import {
   getDocument,
   listAllDocuments,
@@ -306,9 +306,11 @@ describe('backwards compatibility', () => {
     await restoreArchive(parsed);
 
     const restored = await getDocument('legacy-doc');
-    expect(restored.schemaVersion).toBe(2);
+    expect(restored.schemaVersion).toBe(SCHEMA_VERSION);
     expect(restored.kind).toBe('single');
     expect(restored.ownsFile).toBe(true);
+    // A legacy archive predates renaming, so its name is its original.
+    expect(restored.originalName).toBe(restored.name);
     // The v1 payload must survive the migration untouched.
     expect(restored.extractedText).toBe('legacy text');
   });

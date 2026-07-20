@@ -77,7 +77,14 @@ function DocumentListItem({ doc, pages, selected, selectedId, onSelect }) {
           className={`${rowClasses(selected)} min-w-0 flex-1`}
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-sm font-medium text-ink">{doc.name}</span>
+            {/* The original filename stays discoverable on hover once
+                extraction has renamed the document. */}
+            <span
+              className="truncate text-sm font-medium text-ink"
+              title={doc.originalName && doc.originalName !== doc.name ? doc.originalName : doc.name}
+            >
+              {doc.name}
+            </span>
             <StatusBadge
               status={doc.status}
               pages={hasPages ? summarizePages(pages) : null}

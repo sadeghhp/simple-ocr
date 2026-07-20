@@ -16,6 +16,7 @@ import {
   updateDocument,
 } from '@/lib/db/documents';
 import { createFileRecord, deleteFile, getFile, putFile } from '@/lib/db/files';
+import { deriveDocumentName, pageDisplayName } from '@/lib/naming';
 import { getSetting, setSetting, SETTINGS_KEYS } from '@/lib/db/settings';
 import { validateFile } from '@/lib/files/validation';
 import { runOcr } from '@/lib/providers/adapter';
@@ -170,8 +171,21 @@ export function cancelProcessing(documentId) {
   return Boolean(controller);
 }
 
+/**
+ * The name a freshly extracted document should take, or null to keep the
+ * current one.
+ *
+ * Pages are excluded: a page's name always follows its parent's. A locked name
+ * is one the user chose, and re-processing must never undo that choice.
+ */
+function derivedNamePatch(doc, extraction) {
+  if (!doc || doc.kind === DOCUMENT_KIND.page || doc.nameLocked) return null;
+  const next = deriveDocumentName(extraction?.subject, doc.originalName ?? doc.name);
+  return next && next !== doc.name ? { name: next } : null;
+}
+
 /** The fields written when a page or document finishes successfully. */
-function completionPatch(result) {
+function completionPatch(result, doc) {
   return {
     status: DOCUMENT_STATUS.completed,
     extractedText: result.text,
@@ -184,6 +198,9 @@ function completionPatch(result) {
     model: result.model,
     processedAt: result.processedAt,
     processingError: null,
+    // The document is named after what the model understood it to be. The
+    // uploaded filename stays in `originalName`, so this is always reversible.
+    ...derivedNamePatch(doc, result.extraction),
   };
 }
 
@@ -236,7 +253,7 @@ async function processSingle(doc, signal) {
       { signal }
     );
     await rememberJsonModeRejection(config, result);
-    return await updateDocument(doc.id, completionPatch(result));
+    return await updateDocument(doc.id, completionPatch(result, doc));
   } catch (err) {
     throw await recordFailure(doc.id, err);
   }
@@ -281,7 +298,7 @@ async function processPage(page, signal, context = null) {
       { signal }
     );
     await rememberJsonModeRejection(config, result);
-    return await updateDocument(page.id, completionPatch(result));
+    return await updateDocument(page.id, completionPatch(result, page));
   } catch (err) {
     throw await recordFailure(page.id, err);
   }
@@ -296,7 +313,7 @@ export async function refreshParentStatus(parentId) {
   const children = await listChildDocuments(parentId);
   const status = deriveParentStatus(children);
   const text = joinPageText(children);
-  return updateDocument(parentId, (current) => ({
+  const updated = await updateDocument(parentId, (current) => ({
     status,
     // The parent's text is the concatenation of its pages, so copy and export
     // keep working at the document level with no special-casing.
@@ -306,7 +323,34 @@ export async function refreshParentStatus(parentId) {
     // Derived, so a document whose pages all failed for one reason reports
     // that reason rather than burying it behind a generic page-failure notice.
     processingError: deriveParentError(children),
+    // A multi-page document is named after its first page: that is where the
+    // letterhead, the invoice number and the title live.
+    ...derivedNamePatch(current, firstPageExtraction(children)),
   })).catch(() => null);
+  if (updated) await syncChildNames(updated, children);
+  return updated;
+}
+
+/** The extraction of page 1, which is what a parent takes its name from. */
+function firstPageExtraction(children) {
+  const first = children.find((child) => child.pageNumber === 1) ?? children[0];
+  return first?.extraction ?? null;
+}
+
+/**
+ * Re-derive every page name from the parent's current name.
+ *
+ * Page names are stored rather than computed at render time because the
+ * importer requires `name` on every record. Storing them means a parent rename
+ * has to flow down — this is that step. Already-correct names are skipped, so
+ * the common case (called after every page transition) writes nothing.
+ */
+async function syncChildNames(parent, children) {
+  for (const child of children) {
+    const name = pageDisplayName(parent.name, child.pageNumber);
+    if (child.name === name) continue;
+    await updateDocument(child.id, { name }).catch(() => {});
+  }
 }
 
 /** Every page of a multi-page document, with bounded concurrency. */
@@ -421,6 +465,33 @@ export function saveExtractionFields(documentId, fields) {
 /** Discard field edits and fall back to the model's extraction. */
 export function resetExtractionFields(documentId) {
   return updateDocument(documentId, { extractionEdited: null });
+}
+
+/**
+ * Rename a document. A blank name is refused rather than silently ignored:
+ * an unnamed row in the sidebar is unusable.
+ */
+export async function renameDocument(documentId, name) {
+  const trimmed = typeof name === 'string' ? name.trim() : '';
+  if (trimmed === '') {
+    throw new AppError(ERROR_CODES.INVALID_NAME, 'A document name cannot be empty', {
+      documentId,
+      hint: 'Enter a name, or restore the original filename.',
+    });
+  }
+  const updated = await updateDocument(documentId, { name: trimmed, nameLocked: true });
+  await syncChildNames(updated, await listChildDocuments(documentId));
+  return updated;
+}
+
+/** Undo an automatic rename, restoring the filename the document was uploaded with. */
+export async function restoreOriginalName(documentId) {
+  const updated = await updateDocument(documentId, (doc) => ({
+    name: doc.originalName || doc.name,
+    nameLocked: true,
+  }));
+  await syncChildNames(updated, await listChildDocuments(documentId));
+  return updated;
 }
 
 /** Delete a document and every related record (spec §4.11). */

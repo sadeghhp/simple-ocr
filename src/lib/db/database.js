@@ -6,9 +6,12 @@ import { AppError, ERROR_CODES, toAppError } from '@/lib/errors';
 import { SCHEMA_VERSION, migrateDocumentRecord } from '@/lib/db/migrations';
 
 export const DB_NAME = 'simple-ocr';
-// v3 repairs missing indexes; the record shape is unchanged, so SCHEMA_VERSION
-// stays at 2. Database version and record version move independently.
-export const DB_VERSION = 3;
+// v4 carries record schema v3 (originalName / nameLocked). Record migration
+// only runs during a versionchange transaction, so a record-shape change always
+// needs a database bump to have somewhere to happen. Database version and
+// record version still move independently — v3 was an index repair with no
+// record change at all.
+export const DB_VERSION = 4;
 export { SCHEMA_VERSION };
 
 export const STORES = {
@@ -81,6 +84,21 @@ function upgrade(db, oldVersion, tx) {
     // without the indexes — without a version bump there is no opportunity to
     // create them, since createIndex is only legal during an upgrade.
     ensureDocumentIndexes(tx.objectStore(STORES.documents));
+  }
+
+  if (oldVersion < 4) {
+    // v4: record schema v3 adds `originalName`, backfilled from the current
+    // name — an existing document has never been renamed, so its name is its
+    // original. Without this backfill an older document could be auto-renamed
+    // with no way back to the filename the user knows it by.
+    const documents = tx.objectStore(STORES.documents);
+    const cursorRequest = documents.openCursor();
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return;
+      cursor.update(migrateDocumentRecord(cursor.value));
+      cursor.continue();
+    };
   }
 }
 

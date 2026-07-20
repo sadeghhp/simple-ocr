@@ -39,6 +39,7 @@ export const ERROR_CODES = {
   PDF_TOO_MANY_PAGES: 'PDF_TOO_MANY_PAGES',
   PAGE_PARTIAL_FAILURE: 'PAGE_PARTIAL_FAILURE',
   NOT_FOUND: 'NOT_FOUND',
+  INVALID_NAME: 'INVALID_NAME',
   UNKNOWN: 'UNKNOWN',
 };
 
@@ -152,6 +153,7 @@ const USER_MESSAGES = {
   PDF_TOO_MANY_PAGES: 'This PDF has more pages than the app will process in one document.',
   PAGE_PARTIAL_FAILURE: 'Some pages of this document could not be extracted.',
   NOT_FOUND: 'The requested record no longer exists.',
+  INVALID_NAME: 'That name cannot be used.',
   UNKNOWN: 'Something went wrong.',
 };
 

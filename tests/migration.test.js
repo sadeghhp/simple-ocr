@@ -69,10 +69,21 @@ describe('migrateDocumentRecord', () => {
     expect(migrated.id).toBe('doc-v1');
   });
 
-  it('is idempotent and never downgrades a v2 record', () => {
+  it('is idempotent and never downgrades an already-migrated record', () => {
     const page = { ...v1Record(), ...v2Defaults(), kind: DOCUMENT_KIND.page, pageNumber: 7, schemaVersion: 2 };
-    expect(migrateDocumentRecord(migrateDocumentRecord(page))).toEqual(page);
-    expect(migrateDocumentRecord(page).pageNumber).toBe(7);
+    const once = migrateDocumentRecord(page);
+    // Migrating twice must be indistinguishable from migrating once, whatever
+    // the current SCHEMA_VERSION is — asserting a literal version here would
+    // turn every future bump into a test edit.
+    expect(migrateDocumentRecord(once)).toEqual(once);
+    expect(once.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(once.pageNumber).toBe(7);
+  });
+
+  it('treats a pre-v3 record as never renamed', () => {
+    const migrated = migrateDocumentRecord({ ...v1Record(), ...v2Defaults(), schemaVersion: 2 });
+    expect(migrated.originalName).toBe(migrated.name);
+    expect(migrated.nameLocked).toBe(false);
   });
 });
 
@@ -123,6 +134,54 @@ describe('database upgrade v1 -> v2', () => {
     );
     expect(indexNames).toContain('parentId');
     expect(indexNames).toContain('parentPage');
+  });
+
+  /**
+   * A database already at v3 holding v2 records — the state of every existing
+   * install before this change. Record migration only runs during a
+   * versionchange transaction, so this is the case that proves the DB_VERSION
+   * bump actually reaches those records.
+   */
+  async function seedV3Database(records) {
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 3);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        const documents = db.createObjectStore(STORES.documents, { keyPath: 'id' });
+        documents.createIndex('createdAt', 'createdAt');
+        documents.createIndex('status', 'status');
+        documents.createIndex('name', 'name');
+        documents.createIndex('parentId', 'parentId');
+        documents.createIndex('parentPage', ['parentId', 'pageNumber']);
+        db.createObjectStore(STORES.files, { keyPath: 'id' });
+        db.createObjectStore(STORES.settings, { keyPath: 'key' });
+      };
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction([STORES.documents], 'readwrite');
+        records.forEach((record) => tx.objectStore(STORES.documents).put(record));
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  it('backfills originalName onto records already at v2', async () => {
+    await seedV3Database([
+      { ...v1Record('a'), ...v2Defaults(), name: 'scan_0012.pdf', schemaVersion: 2 },
+    ]);
+
+    const [doc] = await listAllDocuments();
+    expect(doc.schemaVersion).toBe(SCHEMA_VERSION);
+    // An existing document has never been renamed, so its name is its original
+    // — without this it could be auto-renamed with no way back.
+    expect(doc.originalName).toBe('scan_0012.pdf');
+    expect(doc.nameLocked).toBe(false);
+    expect(doc.extractedText).toBe('legacy text');
   });
 
   it('leaves migrated v1 documents out of the child index', async () => {

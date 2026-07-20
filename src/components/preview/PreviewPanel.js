@@ -5,6 +5,7 @@ import { EmptyState } from '@/components/feedback/EmptyState';
 import { Spinner } from '@/components/feedback/Spinner';
 import { StatusBadge } from '@/components/feedback/StatusBadge';
 import { FileIcon, ImageIcon } from '@/components/common/icons';
+import { useAppState } from '@/hooks/useAppState';
 import { useDocumentFile } from '@/hooks/useDocumentFile';
 import { useObjectUrl } from '@/hooks/useObjectUrl';
 import { formatBytes } from '@/lib/files/convert';
@@ -132,6 +133,31 @@ function PagePreview({ doc, blob }) {
   return <ImagePreview url={url} name={`Page ${doc.pageNumber} of ${doc.name}`} />;
 }
 
+/**
+ * Shown when extraction has renamed a document. The uploaded filename is the
+ * only way back to a document the user knows by its scanner name, so it stays
+ * visible rather than living in a menu.
+ */
+function RenamedNotice({ doc }) {
+  const { restoreName } = useAppState();
+  if (doc.kind === DOCUMENT_KIND.page) return null;
+  if (!doc.originalName || doc.originalName === doc.name) return null;
+  return (
+    <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-ink-faint">
+      <span className="truncate" title={doc.originalName}>
+        was {doc.originalName}
+      </span>
+      <button
+        type="button"
+        onClick={() => restoreName(doc.id)}
+        className="shrink-0 rounded px-1 underline underline-offset-2 hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        Restore
+      </button>
+    </span>
+  );
+}
+
 /** Center preview area (spec §9.2, §4.8). */
 export function PreviewPanel({ doc }) {
   const { file, loading } = useDocumentFile(doc?.fileId ?? null);
@@ -160,6 +186,7 @@ export function PreviewPanel({ doc }) {
                 doc.pageCount ? ` · ${doc.pageCount} pages` : ''
               }`}
         </span>
+        <RenamedNotice doc={doc} />
         <span className="ml-auto">
           <StatusBadge status={doc.status} />
         </span>
