@@ -250,31 +250,34 @@ describe('processing a multi-page document', () => {
     await saveProviderConfig(validConfig());
     const parent = await uploadFile(pdfFile());
 
-    // Several pages are in flight at once, so every pending request needs
-    // releasing or the run never settles.
-    const releases = [];
+    // Hold the first provider request open until after the guard is checked,
+    // then let every later request resolve immediately. A fixed sleep is too
+    // brittle on CI, and releasing only the fetches already queued leaves the
+    // parent run hanging once the pool schedules the next page.
+    let gateOpen = false;
+    const waiting = [];
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation(
         () =>
           new Promise((resolve) => {
-            releases.push(() => resolve(extractionReply('page')));
+            const finish = () => resolve(extractionReply('page'));
+            if (gateOpen) finish();
+            else waiting.push(finish);
           })
       )
     );
 
     const run = processDocument(parent.id);
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(waiting.length).toBeGreaterThan(0));
 
     const page = (await listChildDocuments(parent.id))[0];
     await expect(processDocument(page.id)).rejects.toMatchObject({
       code: 'ALREADY_PROCESSING',
     });
 
-    while (releases.length > 0) {
-      releases.shift()();
-      await new Promise((r) => setTimeout(r, 5));
-    }
+    gateOpen = true;
+    waiting.splice(0).forEach((finish) => finish());
     await run;
   });
 
