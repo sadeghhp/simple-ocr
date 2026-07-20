@@ -28,6 +28,16 @@ npm run build      # static export to out/
 
 Deploy by serving the `out/` directory from any static host. GitHub Pages deploys automatically on push to `main` (see `.github/workflows/pages.yml`).
 
+### GitHub Pages (one-time setup)
+
+If the deploy workflow fails with `Failed to create deployment (status: 404)`, Pages is not enabled yet:
+
+1. Open [github.com/sadeghhp/simple-ocr/settings/pages](https://github.com/sadeghhp/simple-ocr/settings/pages)
+2. Under **Build and deployment**, set **Source** to **GitHub Actions** (not “Deploy from a branch”)
+3. Re-run the **Deploy to GitHub Pages** workflow from the Actions tab (or push an empty commit)
+
+The repo must be **public** on a free GitHub account (private repos need a paid plan for Pages). After the first successful deploy, the site is at [sadeghhp.github.io/simple-ocr](https://sadeghhp.github.io/simple-ocr/).
+
 To test a GitHub Pages build locally:
 
 ```bash
