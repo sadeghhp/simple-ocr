@@ -23,6 +23,14 @@ function Icon({ children, size = 16, className = '', ...props }) {
   );
 }
 
+export function ChevronRightIcon(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="9 18 15 12 9 6" />
+    </Icon>
+  );
+}
+
 export function UploadIcon(props) {
   return (
     <Icon {...props}>

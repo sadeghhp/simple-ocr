@@ -4,13 +4,33 @@
  */
 import JSZip from 'jszip';
 import { AppError, ERROR_CODES, toAppError } from '@/lib/errors';
-import { EXPORT_VERSION } from '@/lib/export/exporter';
-import { DOCUMENT_STATUS, getDocument, putDocument } from '@/lib/db/documents';
+import { SUPPORTED_EXPORT_VERSIONS } from '@/lib/export/exporter';
+import {
+  DOCUMENT_KIND,
+  DOCUMENT_STATUS,
+  deleteDocumentTree,
+  getDocument,
+  putDocument,
+} from '@/lib/db/documents';
 import { deleteFile, getFile, putFile } from '@/lib/db/files';
-import { SCHEMA_VERSION } from '@/lib/db/database';
+import { migrateDocumentRecord } from '@/lib/db/migrations';
+import { deriveParentStatus } from '@/lib/pipeline/status';
+import { TEMPLATE_IDS } from '@/lib/extraction/templates';
 import { MAX_FILE_BYTES, isSupportedMimeType } from '@/lib/files/validation';
 
 const REQUIRED_DOC_FIELDS = ['id', 'fileId', 'name', 'mimeType', 'size', 'createdAt', 'status'];
+
+/**
+ * Bring every document in a manifest to the current schema.
+ * A v1 archive takes exactly the same migration path as a v1 database, so the
+ * two cannot drift apart.
+ */
+function migrateManifestDocuments(manifest) {
+  return {
+    ...manifest,
+    documents: manifest.documents.map((doc) => migrateDocumentRecord(doc)),
+  };
+}
 
 /**
  * Validate a parsed manifest (pure; unit-testable).
@@ -22,7 +42,7 @@ export function validateManifest(manifest) {
     throw new AppError(ERROR_CODES.IMPORT_INVALID, reason, { hint: reason });
   };
   if (!manifest || typeof manifest !== 'object') fail('The archive has no readable manifest.');
-  if (manifest.exportVersion !== EXPORT_VERSION) {
+  if (!SUPPORTED_EXPORT_VERSIONS.includes(manifest.exportVersion)) {
     fail(`Unsupported export version: ${manifest.exportVersion ?? 'missing'}.`);
   }
   if (!Array.isArray(manifest.documents)) fail('The manifest has no document list.');
@@ -74,8 +94,49 @@ export function validateManifest(manifest) {
     if (doc.editedText != null && typeof doc.editedText !== 'string') {
       fail(`Document "${doc.name}" has a non-text edited result.`);
     }
+    if (doc.extraction != null && (typeof doc.extraction !== 'object' || Array.isArray(doc.extraction))) {
+      fail(`Document "${doc.name}" has a malformed extraction record.`);
+    }
+    if (doc.documentType != null && !TEMPLATE_IDS.includes(doc.documentType)) {
+      fail(`Document "${doc.name}" has an unknown document type: ${doc.documentType}.`);
+    }
   }
-  return { documentCount: manifest.documents.length, fileCount: manifest.files.length };
+
+  // Parent/child integrity. A broken reference here would produce pages that
+  // are invisible in the sidebar but still occupy storage.
+  const byId = new Map(manifest.documents.map((doc) => [doc.id, doc]));
+  const pagesByParent = new Map();
+  for (const doc of manifest.documents) {
+    if (!doc.parentId) continue;
+    if (doc.parentId === doc.id) fail(`Document "${doc.name}" lists itself as its parent.`);
+
+    const parent = byId.get(doc.parentId);
+    if (!parent) fail(`Page "${doc.name}" references a parent that is not in the archive.`);
+    if (parent.kind !== DOCUMENT_KIND.parent) {
+      fail(`Page "${doc.name}" references a document that is not a multi-page parent.`);
+    }
+    if (!Number.isInteger(doc.pageNumber) || doc.pageNumber < 1) {
+      fail(`Page "${doc.name}" has an invalid page number: ${doc.pageNumber}.`);
+    }
+    if (!pagesByParent.has(doc.parentId)) pagesByParent.set(doc.parentId, new Set());
+    const seen = pagesByParent.get(doc.parentId);
+    if (seen.has(doc.pageNumber)) {
+      fail(`Document "${parent.name}" has two copies of page ${doc.pageNumber}.`);
+    }
+    seen.add(doc.pageNumber);
+  }
+
+  for (const doc of manifest.documents) {
+    if (doc.kind !== DOCUMENT_KIND.parent) continue;
+    const pageCount = pagesByParent.get(doc.id)?.size ?? 0;
+    if (pageCount === 0) fail(`Document "${doc.name}" is marked multi-page but has no pages.`);
+  }
+
+  return {
+    documentCount: manifest.documents.length,
+    rootCount: manifest.documents.filter((doc) => !doc.parentId).length,
+    fileCount: manifest.files.length,
+  };
 }
 
 /**
@@ -103,9 +164,9 @@ export async function parseArchive(archiveFile) {
       hint: 'This zip file was not created by Simple OCR — it has no manifest.json.',
     });
   }
-  let manifest;
+  let parsed;
   try {
-    manifest = JSON.parse(await manifestEntry.async('string'));
+    parsed = JSON.parse(await manifestEntry.async('string'));
   } catch (err) {
     throw new AppError(ERROR_CODES.IMPORT_INVALID, 'manifest.json is not valid JSON.', {
       cause: err,
@@ -113,6 +174,14 @@ export async function parseArchive(archiveFile) {
       detail: err?.message ?? null,
     });
   }
+  if (!parsed || !Array.isArray(parsed.documents)) {
+    throw new AppError(ERROR_CODES.IMPORT_INVALID, 'The manifest has no document list.', {
+      hint: 'The manifest has no document list.',
+    });
+  }
+  // Migrate before validating, so an older archive is checked against the rules
+  // it will actually be stored under.
+  const manifest = migrateManifestDocuments(parsed);
   const summary = validateManifest(manifest);
   for (const file of manifest.files) {
     if (!zip.file(`files/${file.id}`)) {
@@ -125,52 +194,106 @@ export async function parseArchive(archiveFile) {
 
 /**
  * Restore a parsed archive into IndexedDB. Documents whose id already exists
- * locally get fresh ids (both document and file) so imports never overwrite.
+ * locally get fresh ids so imports never overwrite existing data.
+ *
+ * Three passes, and the ordering is load-bearing. Remapping ids inside a single
+ * write loop cannot work once documents share a file or reference each other:
+ * every page of a PDF names the same fileId, so a per-document remap would
+ * store the same blob once per page under a different id each time, and a
+ * page's parentId would still point at the parent's *old* id — orphaning every
+ * page in the archive.
  */
 export async function restoreArchive({ manifest, zip }) {
-  let imported = 0;
+  const written = { documents: [], files: [] };
+
+  // Pass 1 — decide every id up front, so later passes only ever look up.
+  const docIdMap = new Map();
   for (const doc of manifest.documents) {
-    const fileMeta = manifest.files.find((f) => f.id === doc.fileId);
-    const binary = await zip.file(`files/${doc.fileId}`).async('arraybuffer');
-    // validateManifest guarantees doc.mimeType is allowlisted and agrees with
-    // the file entry, so it is the single source of truth for the blob type.
-    const blob = new Blob([binary], { type: doc.mimeType });
+    docIdMap.set(doc.id, (await getDocument(doc.id)) ? crypto.randomUUID() : doc.id);
+  }
+  const fileIdMap = new Map();
+  for (const file of manifest.files) {
+    fileIdMap.set(file.id, (await getFile(file.id)) ? crypto.randomUUID() : file.id);
+  }
 
-    // Regenerate either id independently — a colliding file id would otherwise
-    // overwrite an unrelated document's stored blob.
-    const docId = (await getDocument(doc.id)) ? crypto.randomUUID() : doc.id;
-    const fileId = (await getFile(doc.fileId)) ? crypto.randomUUID() : doc.fileId;
+  const rollback = async () => {
+    for (const id of written.documents) await deleteDocumentTree(id).catch(() => {});
+    for (const id of written.files) await deleteFile(id).catch(() => {});
+  };
 
-    await putFile({
-      id: fileId,
-      blob,
-      name: fileMeta?.name ?? doc.name,
-      mimeType: doc.mimeType,
-      size: blob.size,
-      createdAt: fileMeta?.createdAt ?? doc.createdAt,
-    });
-    try {
-      await putDocument({
-        ...doc,
-        id: docId,
-        fileId,
-        // A document exported mid-processing resumes as ready.
-        status:
-          doc.status === DOCUMENT_STATUS.processing ? DOCUMENT_STATUS.ready : doc.status,
-        schemaVersion: doc.schemaVersion ?? SCHEMA_VERSION,
+  const fail = async (err, imported) => {
+    await rollback();
+    const error = toAppError(err, ERROR_CODES.STORAGE_ERROR);
+    error.hint =
+      imported > 0
+        ? `The import was rolled back after ${imported} of ${manifest.documents.length} documents; nothing was added.`
+        : error.hint;
+    throw error;
+  };
+
+  // Pass 2 — write each distinct blob exactly once, never once per document.
+  try {
+    for (const file of manifest.files) {
+      const binary = await zip.file(`files/${file.id}`).async('arraybuffer');
+      // validateManifest guarantees the type is allowlisted and agrees with
+      // every document pointing at it.
+      const blob = new Blob([binary], { type: file.mimeType });
+      const fileId = fileIdMap.get(file.id);
+      await putFile({
+        id: fileId,
+        blob,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: blob.size,
+        createdAt: file.createdAt,
       });
+      written.files.push(fileId);
+    }
+  } catch (err) {
+    await fail(err, 0);
+  }
+
+  // Pass 3 — parents before pages, with every reference remapped.
+  const ordered = [
+    ...manifest.documents.filter((doc) => !doc.parentId),
+    ...manifest.documents.filter((doc) => doc.parentId),
+  ];
+  const importedChildren = new Map();
+  let imported = 0;
+
+  for (const doc of ordered) {
+    const record = {
+      ...doc,
+      id: docIdMap.get(doc.id),
+      fileId: fileIdMap.get(doc.fileId),
+      parentId: doc.parentId ? docIdMap.get(doc.parentId) : null,
+      // A document exported mid-processing resumes as ready.
+      status: doc.status === DOCUMENT_STATUS.processing ? DOCUMENT_STATUS.ready : doc.status,
+    };
+    try {
+      await putDocument(record);
     } catch (err) {
-      // Do not leave a blob with no document pointing at it.
-      await deleteFile(fileId).catch(() => {});
-      const error = toAppError(err, ERROR_CODES.STORAGE_ERROR);
-      // Report what did land, so a partial import is not described as none.
-      error.hint =
-        imported > 0
-          ? `${imported} ${imported === 1 ? 'document' : 'documents'} imported before this failure; the rest were not.`
-          : error.hint;
-      throw error;
+      await fail(err, imported);
+    }
+    written.documents.push(record.id);
+    if (record.parentId) {
+      if (!importedChildren.has(record.parentId)) importedChildren.set(record.parentId, []);
+      importedChildren.get(record.parentId).push(record);
     }
     imported += 1;
   }
-  return { imported };
+
+  // Parent status is derived, never trusted from the archive — a hand-edited
+  // manifest could otherwise claim `completed` for a document with failed pages.
+  for (const [parentId, pages] of importedChildren) {
+    const parent = await getDocument(parentId);
+    if (!parent) continue;
+    await putDocument({
+      ...parent,
+      status: deriveParentStatus(pages),
+      pageCount: pages.length,
+    });
+  }
+
+  return { imported, rootCount: manifest.documents.filter((doc) => !doc.parentId).length };
 }

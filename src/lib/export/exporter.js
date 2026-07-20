@@ -8,7 +8,10 @@ import JSZip from 'jszip';
 import { listAllDocuments } from '@/lib/db/documents';
 import { listFiles } from '@/lib/db/files';
 
-export const EXPORT_VERSION = 1;
+/** Bumped to 2 for multi-page documents (parent/child records). */
+export const EXPORT_VERSION = 2;
+/** Archives this build can still read. v1 records are migrated on import. */
+export const SUPPORTED_EXPORT_VERSIONS = [1, 2];
 export const APP_VERSION = '0.1.0';
 
 /** Build the manifest object from document + file records (pure; unit-testable). */
@@ -43,12 +46,19 @@ export async function buildExportBlob() {
   }
   const content = await zip.generateAsync({ type: 'arraybuffer' });
   const blob = new Blob([content], { type: 'application/zip' });
-  return { blob, documentCount: documents.length, fileCount: files.length };
+  return {
+    blob,
+    documentCount: documents.length,
+    // What the user actually uploaded. Counting pages would report "4
+    // documents" for one three-page PDF.
+    rootCount: documents.filter((doc) => !doc.parentId).length,
+    fileCount: files.length,
+  };
 }
 
 /** Trigger a browser download of the export archive. */
 export async function downloadExport() {
-  const { blob, documentCount } = await buildExportBlob();
+  const { blob, rootCount } = await buildExportBlob();
   const stamp = new Date().toISOString().slice(0, 10);
   const url = URL.createObjectURL(blob);
   try {
@@ -62,5 +72,5 @@ export async function downloadExport() {
     // Delay revocation so the download can start.
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
-  return { documentCount };
+  return { documentCount: rootCount };
 }

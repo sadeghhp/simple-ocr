@@ -13,11 +13,13 @@ import {
   useRef,
   useState,
 } from 'react';
-// Still the flat list: the sidebar moves to listRootDocuments() + a children
-// map when it learns to render nested pages.
+// The flat list is loaded once and sliced in memory. Querying roots and
+// children separately would cost two round trips and, more importantly, would
+// leave `selectedDocument` unable to resolve a selected page.
 import { listAllDocuments } from '@/lib/db/documents';
 import { toAppError } from '@/lib/errors';
 import {
+  cancelProcessing,
   deleteDocument,
   loadProviderConfig,
   processDocument,
@@ -37,6 +39,9 @@ export function AppStateProvider({ children }) {
   const [processingIds, setProcessingIds] = useState(() => new Set());
   const [notice, setNotice] = useState(null); // { kind: 'error'|'success', text }
   const mounted = useRef(true);
+  // Read by `process` so it can mark a parent's pages without depending on
+  // `documents` and re-creating the callback on every refresh.
+  const documentsRef = useRef([]);
 
   useEffect(() => {
     mounted.current = true;
@@ -48,6 +53,7 @@ export function AppStateProvider({ children }) {
   const refreshDocuments = useCallback(async () => {
     try {
       const docs = await listAllDocuments();
+      documentsRef.current = docs;
       if (!mounted.current) return docs;
       setDocuments(docs);
       setDocumentsLoaded(true);
@@ -101,19 +107,30 @@ export function AppStateProvider({ children }) {
 
   const process = useCallback(
     async (documentId) => {
-      setProcessingIds((prev) => new Set(prev).add(documentId));
-      // Show the `processing` status row immediately.
-      const bump = setTimeout(refreshDocuments, 50);
+      // A parent marks its pages as processing too, so every affected row in
+      // the tree shows activity rather than just the one that was clicked.
+      const affected = [documentId, ...documentsRef.current
+        .filter((doc) => doc.parentId === documentId)
+        .map((doc) => doc.id)];
+      setProcessingIds((prev) => {
+        const next = new Set(prev);
+        affected.forEach((id) => next.add(id));
+        return next;
+      });
+
+      // Pages complete one at a time, so poll rather than refreshing once at
+      // the start — otherwise a 40-page document looks frozen until the end.
+      const poll = setInterval(refreshDocuments, 700);
       try {
         await processDocument(documentId);
         return null;
       } catch (err) {
         return toAppError(err);
       } finally {
-        clearTimeout(bump);
+        clearInterval(poll);
         setProcessingIds((prev) => {
           const next = new Set(prev);
-          next.delete(documentId);
+          affected.forEach((id) => next.delete(id));
           return next;
         });
         await refreshDocuments();
@@ -121,6 +138,8 @@ export function AppStateProvider({ children }) {
     },
     [refreshDocuments]
   );
+
+  const cancel = useCallback((documentId) => cancelProcessing(documentId), []);
 
   const remove = useCallback(
     async (documentId) => {
@@ -136,12 +155,35 @@ export function AppStateProvider({ children }) {
     setProviderConfig(config);
   }, []);
 
+  // Sliced once per document change rather than per render: the sidebar shows
+  // roots, the tree expands children, and selection must resolve either.
+  const { rootDocuments, childrenByParent } = useMemo(() => {
+    const roots = [];
+    const byParent = new Map();
+    for (const doc of documents) {
+      if (doc.parentId) {
+        if (!byParent.has(doc.parentId)) byParent.set(doc.parentId, []);
+        byParent.get(doc.parentId).push(doc);
+      } else {
+        roots.push(doc);
+      }
+    }
+    for (const pages of byParent.values()) {
+      pages.sort((a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0));
+    }
+    return { rootDocuments: roots, childrenByParent: byParent };
+  }, [documents]);
+
   const value = useMemo(
     () => ({
       documents,
+      rootDocuments,
+      childrenByParent,
       documentsLoaded,
       selectedId,
       setSelectedId,
+      // Resolves a page as readily as a root — this lookup is why the flat
+      // list is kept in state rather than querying roots only.
       selectedDocument: documents.find((d) => d.id === selectedId) ?? null,
       providerConfig,
       providerLoaded,
@@ -151,11 +193,14 @@ export function AppStateProvider({ children }) {
       refreshDocuments,
       upload,
       process,
+      cancel,
       remove,
       saveProvider,
     }),
     [
       documents,
+      rootDocuments,
+      childrenByParent,
       documentsLoaded,
       selectedId,
       providerConfig,
@@ -165,6 +210,7 @@ export function AppStateProvider({ children }) {
       refreshDocuments,
       upload,
       process,
+      cancel,
       remove,
       saveProvider,
     ]

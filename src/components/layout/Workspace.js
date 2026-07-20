@@ -63,6 +63,8 @@ function Notice({ notice, onDismiss }) {
 export function Workspace() {
   const {
     documents,
+    rootDocuments,
+    childrenByParent,
     documentsLoaded,
     selectedId,
     setSelectedId,
@@ -74,6 +76,7 @@ export function Workspace() {
     refreshDocuments,
     upload,
     process,
+    cancel,
     remove,
     saveProvider,
   } = useAppState();
@@ -200,7 +203,8 @@ export function Workspace() {
         {/* Sidebar: fixed column on desktop, drawer on mobile */}
         <aside className="hidden w-72 shrink-0 border-r border-edge lg:block">
           <Sidebar
-            documents={documents}
+            documents={rootDocuments}
+            childrenByParent={childrenByParent}
             documentsLoaded={documentsLoaded}
             selectedId={selectedId}
             onSelect={setSelectedId}
@@ -226,7 +230,8 @@ export function Workspace() {
                 </IconButton>
               </div>
               <Sidebar
-                documents={documents}
+                documents={rootDocuments}
+                childrenByParent={childrenByParent}
                 documentsLoaded={documentsLoaded}
                 selectedId={selectedId}
                 onSelect={(id) => {
@@ -280,6 +285,7 @@ export function Workspace() {
             providerConfigured={providerConfigured}
             processing={processing}
             onProcess={process}
+            onCancel={cancel}
             onOpenSettings={() => setSettingsOpen(true)}
             onDocumentChanged={refreshDocuments}
           />

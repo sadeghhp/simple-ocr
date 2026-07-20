@@ -12,6 +12,7 @@ import { StorageMeter } from '@/components/layout/StorageMeter';
  */
 export function Sidebar({
   documents,
+  childrenByParent,
   documentsLoaded,
   selectedId,
   onSelect,
@@ -37,6 +38,7 @@ export function Sidebar({
       <nav className="min-h-0 flex-1 overflow-y-auto" aria-label="Document list">
         <DocumentList
           documents={documents}
+          childrenByParent={childrenByParent}
           loaded={documentsLoaded}
           selectedId={selectedId}
           onSelect={onSelect}

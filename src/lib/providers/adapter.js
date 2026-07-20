@@ -9,6 +9,9 @@
 import { AppError, ERROR_CODES, toAppError } from '@/lib/errors';
 import { blobToBase64, blobToDataUrl, blobToText } from '@/lib/files/convert';
 import { DEFAULT_OCR_INSTRUCTION, assertProviderConfigured } from '@/lib/providers/validation';
+import { buildSystemMessages } from '@/lib/extraction/prompt';
+import { parseExtractionPayload } from '@/lib/extraction/parse';
+import { coerceExtraction, degradedExtraction } from '@/lib/extraction/coerce';
 
 /** Build the user-message content parts for the given file. */
 async function buildContentParts(blob, mimeType, name) {
@@ -43,7 +46,18 @@ async function buildContentParts(blob, mimeType, name) {
   );
 }
 
-export function buildRequest(config, contentParts) {
+/**
+ * The user's OCR instruction, but only when they have actually customized it.
+ * The stock instruction is fully subsumed by the extraction contract, and
+ * sending both just repeats the ask in weaker words.
+ */
+function customInstruction(config) {
+  const instruction = (config.instruction || '').trim();
+  if (!instruction || instruction === DEFAULT_OCR_INSTRUCTION.trim()) return null;
+  return instruction;
+}
+
+export function buildRequest(config, contentParts, { jsonMode = true } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
   for (const header of config.headers || []) {
@@ -53,11 +67,28 @@ export function buildRequest(config, contentParts) {
   const body = {
     model: config.model,
     messages: [
-      { role: 'system', content: config.instruction || DEFAULT_OCR_INSTRUCTION },
+      ...buildSystemMessages(customInstruction(config)),
       { role: 'user', content: contentParts },
     ],
   };
+  // Many OpenAI-compatible gateways reject response_format outright, so this is
+  // sent optimistically and withdrawn on the one-shot downgrade in runOcr.
+  if (jsonMode && config.supportsJsonMode !== false) {
+    body.response_format = { type: 'json_object' };
+  }
   return { headers, body };
+}
+
+/** Provider complaints that mean "I do not understand response_format". */
+const JSON_MODE_REJECTION = /response_format|json_object|json mode|json_schema|not supported|unrecognized|unknown (field|parameter|argument)|invalid.*parameter/i;
+
+function looksLikeJsonModeRejection(error) {
+  if (!error) return false;
+  // A 400/422 is the shape of "I do not understand this field"; a 500 is the
+  // provider failing for its own reasons and retrying without JSON mode would
+  // just lose the structure for nothing.
+  const text = `${error.message || ''} ${error.detail || ''}`;
+  return JSON_MODE_REJECTION.test(text);
 }
 
 const DETAIL_LIMIT = 700;
@@ -244,18 +275,10 @@ function endpointHint(endpoint) {
   return null;
 }
 
-/**
- * Run OCR for one stored file.
- * @param {Blob} blob original file blob
- * @param {{mimeType: string, name: string}} fileMeta
- * @param {object} config provider configuration
- * @returns normalized `{ text, provider, model, processedAt, rawMetadata }`
- */
-export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch } = {}) {
-  assertProviderConfigured(config);
+/** One request/response cycle. Returns `{ text, payload }` or throws an AppError. */
+async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode }) {
   const endpoint = config.endpoint.trim();
-  const contentParts = await buildContentParts(blob, fileMeta.mimeType, fileMeta.name);
-  const { headers, body } = buildRequest(config, contentParts);
+  const { headers, body } = buildRequest(config, contentParts, { jsonMode });
 
   let response;
   try {
@@ -263,8 +286,17 @@ export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch } = {})
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal,
     });
   } catch (err) {
+    // A cancelled request must not be reported as a network failure — telling
+    // someone to check their connection after they pressed Cancel is nonsense.
+    if (err?.name === 'AbortError' || signal?.aborted) {
+      throw new AppError(ERROR_CODES.PROCESSING_CANCELLED, 'Request was cancelled', {
+        cause: err,
+        retryable: true,
+      });
+    }
     // fetch rejects with TypeError for both network failures and CORS
     // blocks; the browser hides which one it was.
     throw new AppError(ERROR_CODES.NETWORK_ERROR, err?.message || 'Request failed', {
@@ -323,8 +355,61 @@ export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch } = {})
     }
     throw err;
   }
+  return { text, payload };
+}
+
+/**
+ * Run OCR for one stored file or rendered page.
+ *
+ * Returns `{ text, extraction, warnings, provider, model, processedAt,
+ * rawMetadata, jsonModeRejected }`. `text` is the page's plain text and keeps
+ * its original meaning; `extraction` is the structured document.
+ *
+ * A reply that is not valid JSON does NOT fail: the whole reply is preserved as
+ * a degraded extraction with a warning. Losing a good page of OCR because the
+ * model wrapped it badly would be the worst outcome available.
+ */
+export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch, signal = null } = {}) {
+  assertProviderConfigured(config);
+  const contentParts = await buildContentParts(blob, fileMeta.mimeType, fileMeta.name);
+
+  let jsonMode = config.supportsJsonMode !== false;
+  let jsonModeRejected = false;
+  let result;
+
+  try {
+    result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode });
+  } catch (err) {
+    if (!jsonMode || !looksLikeJsonModeRejection(err)) throw err;
+    // The gateway does not understand response_format. Retry once without it
+    // and let the caller remember, so this costs one request per provider and
+    // not one per page.
+    jsonMode = false;
+    jsonModeRejected = true;
+    result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode: false });
+  }
+
+  const { text, payload } = result;
+  const parsed = parseExtractionPayload(text);
+
+  let extraction;
+  let warnings;
+  if (parsed.data) {
+    const coerced = coerceExtraction(parsed.data, { fallbackText: text });
+    extraction = coerced.extraction;
+    warnings = [...parsed.warnings, ...coerced.warnings];
+  } else {
+    extraction = degradedExtraction(text);
+    warnings = [...parsed.warnings, ERROR_CODES.EXTRACTION_NOT_JSON];
+  }
+
   return {
-    text,
+    // Plain text stays the primary result: the editor, export and search all
+    // read this, and they must keep working regardless of the JSON.
+    text: extraction.rawText || text,
+    extraction,
+    warnings,
+    jsonModeRejected,
     provider: config.name || new URL(config.endpoint).hostname,
     model: payload?.model || config.model,
     processedAt: new Date().toISOString(),

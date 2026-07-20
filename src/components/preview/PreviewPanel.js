@@ -9,6 +9,9 @@ import { useDocumentFile } from '@/hooks/useDocumentFile';
 import { useObjectUrl } from '@/hooks/useObjectUrl';
 import { formatBytes } from '@/lib/files/convert';
 import { PREVIEW_KIND, previewKind } from '@/lib/files/validation';
+import { DOCUMENT_KIND } from '@/lib/db/documents';
+import { renderPageCached } from '@/lib/pdf/render';
+import { toAppError, userMessage } from '@/lib/errors';
 
 function ImagePreview({ url, name }) {
   return (
@@ -85,6 +88,50 @@ function UnsupportedPreview({ doc }) {
   );
 }
 
+/**
+ * One rendered page of a parent PDF.
+ *
+ * Rendered on demand rather than stored: page images for a large document run
+ * to tens of megabytes, and the shared LRU cache makes flipping between pages
+ * cheap without spending the storage quota.
+ */
+function PagePreview({ doc, blob }) {
+  const [state, setState] = useState({ blob: null, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ blob: null, error: null });
+    renderPageCached(doc.fileId, blob, doc.pageNumber)
+      .then((image) => {
+        if (!cancelled) setState({ blob: image, error: null });
+      })
+      .catch((err) => {
+        if (!cancelled) setState({ blob: null, error: toAppError(err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc.fileId, doc.pageNumber, blob]);
+
+  const url = useObjectUrl(state.blob);
+
+  if (state.error) {
+    return (
+      <EmptyState title="This page could not be rendered">
+        {userMessage(state.error)}
+      </EmptyState>
+    );
+  }
+  if (!url) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Spinner size={20} />
+      </div>
+    );
+  }
+  return <ImagePreview url={url} name={`Page ${doc.pageNumber} of ${doc.name}`} />;
+}
+
 /** Center preview area (spec §9.2, §4.8). */
 export function PreviewPanel({ doc }) {
   const { file, loading } = useDocumentFile(doc?.fileId ?? null);
@@ -107,7 +154,11 @@ export function PreviewPanel({ doc }) {
           {doc.name}
         </h2>
         <span className="text-[12px] text-ink-faint">
-          {doc.mimeType} · {formatBytes(doc.size)}
+          {doc.kind === DOCUMENT_KIND.page
+            ? `Page ${doc.pageNumber}${doc.documentType ? ` · ${doc.documentType.replace(/_/g, ' ')}` : ''}`
+            : `${doc.mimeType} · ${formatBytes(doc.size)}${
+                doc.pageCount ? ` · ${doc.pageCount} pages` : ''
+              }`}
         </span>
         <span className="ml-auto">
           <StatusBadge status={doc.status} />
@@ -122,6 +173,11 @@ export function PreviewPanel({ doc }) {
           <EmptyState title="Original file missing">
             The stored file for this document could not be found.
           </EmptyState>
+        ) : doc.kind === DOCUMENT_KIND.page ? (
+          // Pages select their renderer from `kind`, not mimeType — they carry
+          // the parent's application/pdf so the export type-agreement check,
+          // which is security-relevant, keeps holding.
+          <PagePreview doc={doc} blob={file.blob} />
         ) : kind === PREVIEW_KIND.image && url ? (
           <ImagePreview url={url} name={doc.name} />
         ) : kind === PREVIEW_KIND.pdf && url ? (

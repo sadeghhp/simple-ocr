@@ -8,7 +8,13 @@ import { ErrorBanner } from '@/components/feedback/ErrorBanner';
 import { Spinner } from '@/components/feedback/Spinner';
 import { DOCUMENT_STATUS } from '@/lib/db/documents';
 import { SAVE_STATE, useDebouncedSave } from '@/hooks/useDebouncedSave';
-import { resetEditedText, saveEditedText } from '@/lib/workflows';
+import {
+  resetEditedText,
+  resetExtractionFields,
+  saveEditedText,
+  saveExtractionFields,
+} from '@/lib/workflows';
+import { FieldEditor } from '@/components/extraction/FieldEditor';
 
 /** Failures the user fixes in provider settings rather than by retrying. */
 const SETTINGS_FIXABLE = new Set([
@@ -41,10 +47,13 @@ export function ExtractionPanel({
   providerConfigured,
   processing,
   onProcess,
+  onCancel,
   onOpenSettings,
   onDocumentChanged,
 }) {
   const [text, setText] = useState('');
+  const [fields, setFields] = useState(null);
+  const [tab, setTab] = useState('fields');
   const [processError, setProcessError] = useState(null);
   const [resetting, setResetting] = useState(false);
 
@@ -62,14 +71,30 @@ export function ExtractionPanel({
     onDocumentChanged?.();
   });
 
+  // Field edits save on their own schedule. Sharing the text hook would make
+  // one queued edit overwrite the other, since each carries a whole value.
+  const {
+    queue: queueFields,
+    flush: flushFields,
+    cancel: cancelFields,
+    state: fieldsSaveState,
+    setState: setFieldsSaveState,
+  } = useDebouncedSave(async (value, documentId) => {
+    await saveExtractionFields(documentId, value);
+    onDocumentChanged?.();
+  });
+
   // Sync the editor when a different document is selected or a new extraction
   // arrives. Any edit still pending is written first, against its own id.
   const docId = doc?.id ?? null;
   useEffect(() => {
     flush();
+    flushFields();
     setText(doc?.editedText ?? '');
+    setFields(doc?.extractionEdited ?? doc?.extraction?.fields ?? null);
     setProcessError(doc?.processingError ?? null);
     setSaveState(SAVE_STATE.idle);
+    setFieldsSaveState(SAVE_STATE.idle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docId, doc?.processedAt]);
 
@@ -88,10 +113,17 @@ export function ExtractionPanel({
   const isProcessing = processing || doc.status === DOCUMENT_STATUS.processing;
   const hasExtraction = doc.extractedText != null;
   const dirty = hasExtraction && text !== doc.extractedText;
+  // Tracked against extractionEdited, deliberately separate from `dirty`:
+  // reformatting a field is not the same edit as rewriting the text.
+  const fieldsDirty = doc.extractionEdited != null;
+  const structured = doc.extraction && !doc.extraction.degraded ? doc.extraction : null;
+  const degraded = Boolean(doc.extraction?.degraded);
+  const activeTab = structured ? tab : 'text';
 
   const startProcessing = async () => {
     setProcessError(null);
     await flush();
+    await flushFields();
     const error = await onProcess(doc.id);
     if (error && error.code !== 'ALREADY_PROCESSING') setProcessError(error);
   };
@@ -100,15 +132,25 @@ export function ExtractionPanel({
     setResetting(true);
     // Discard any queued edit, or it would re-save over the reset.
     cancel();
+    cancelFields();
     try {
-      const updated = await resetEditedText(doc.id);
-      setText(updated.extractedText ?? '');
-      setSaveState(SAVE_STATE.idle);
+      if (activeTab === 'fields') {
+        await resetExtractionFields(doc.id);
+        setFields(doc.extraction?.fields ?? null);
+        setFieldsSaveState(SAVE_STATE.idle);
+      } else {
+        const updated = await resetEditedText(doc.id);
+        setText(updated.extractedText ?? '');
+        setSaveState(SAVE_STATE.idle);
+      }
       onDocumentChanged?.();
     } finally {
       setResetting(false);
     }
   };
+
+  const resetDisabled =
+    isProcessing || resetting || (activeTab === 'fields' ? !fieldsDirty : !dirty);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-panel">
@@ -120,10 +162,39 @@ export function ExtractionPanel({
               <Spinner size={13} /> Processing…
             </span>
           ) : (
-            <SaveIndicator state={saveState} dirty={dirty} />
+            <SaveIndicator
+              state={activeTab === 'fields' ? fieldsSaveState : saveState}
+              dirty={activeTab === 'fields' ? fieldsDirty : dirty}
+            />
           )}
         </span>
       </header>
+
+      {structured ? (
+        <div role="tablist" aria-label="Extraction view" className="flex gap-1 border-b border-edge px-4">
+          {[
+            ['fields', 'Fields'],
+            ['text', 'Raw text'],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              id={`extraction-tab-${key}`}
+              aria-selected={activeTab === key}
+              aria-controls={`extraction-panel-${key}`}
+              onClick={() => setTab(key)}
+              className={`-mb-px border-b-2 px-3 py-2 text-[13px] font-medium focus-visible:outline-2 focus-visible:outline-accent ${
+                activeTab === key
+                  ? 'border-accent text-accent'
+                  : 'border-transparent text-ink-muted hover:text-ink'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
         {!providerConfigured && !hasExtraction ? (
@@ -165,9 +236,37 @@ export function ExtractionPanel({
               </EmptyState>
             ) : null}
 
-            {hasExtraction || isProcessing ? (
+            {degraded && hasExtraction ? (
+              <p className="rounded-md border border-warning-edge bg-warning-soft px-3 py-2 text-[12px] text-warning">
+                The model returned text but not structured fields, so only the raw text is
+                available. Extract again to try for fields.
+              </p>
+            ) : null}
+
+            {structured && activeTab === 'fields' ? (
+              <div
+                id="extraction-panel-fields"
+                role="tabpanel"
+                aria-labelledby="extraction-tab-fields"
+                className="min-h-0 flex-1 overflow-y-auto"
+              >
+                <FieldEditor
+                  extraction={{ ...doc.extraction, fields: fields ?? doc.extraction.fields }}
+                  disabled={isProcessing}
+                  onChange={(next) => {
+                    setFields(next);
+                    queueFields(next, doc.id);
+                  }}
+                />
+              </div>
+            ) : null}
+
+            {(hasExtraction || isProcessing) && activeTab === 'text' ? (
               <textarea
-                aria-label="Extracted text editor"
+                id="extraction-panel-text"
+                role={structured ? 'tabpanel' : undefined}
+                aria-labelledby={structured ? 'extraction-tab-text' : undefined}
+                aria-label={structured ? undefined : 'Extracted text editor'}
                 value={text}
                 disabled={isProcessing}
                 onChange={(event) => {
@@ -193,8 +292,11 @@ export function ExtractionPanel({
                     ? 'Extract again'
                     : 'Extract text'}
               </Button>
+              {isProcessing && onCancel ? (
+                <Button onClick={() => onCancel(doc.id)}>Cancel</Button>
+              ) : null}
               {hasExtraction ? (
-                <Button onClick={handleReset} disabled={isProcessing || resetting || !dirty}>
+                <Button onClick={handleReset} disabled={resetDisabled}>
                   {resetting ? 'Resetting…' : 'Reset to extraction'}
                 </Button>
               ) : null}

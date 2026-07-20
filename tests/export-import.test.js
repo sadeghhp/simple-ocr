@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDatabase, deleteDatabase } from '@/lib/db/database';
 import { listAllDocuments } from '@/lib/db/documents';
 import { listFiles } from '@/lib/db/files';
-import { buildExportBlob, buildManifest } from '@/lib/export/exporter';
+import { EXPORT_VERSION, buildExportBlob, buildManifest } from '@/lib/export/exporter';
 import { parseArchive, restoreArchive, validateManifest } from '@/lib/export/importer';
 import { saveProviderConfig, uploadFile } from '@/lib/workflows';
 import { emptyProviderConfig } from '@/lib/providers/validation';
@@ -28,7 +28,7 @@ describe('buildManifest', () => {
       [{ id: 'f1', name: 'a.png', mimeType: 'image/png', size: 3, createdAt: 'x', blob: new Blob() }],
       { now: '2026-01-01T00:00:00.000Z' }
     );
-    expect(manifest.exportVersion).toBe(1);
+    expect(manifest.exportVersion).toBe(EXPORT_VERSION);
     expect(manifest.createdAt).toBe('2026-01-01T00:00:00.000Z');
     expect(manifest.files[0].path).toBe('files/f1');
     expect(manifest.files[0].blob).toBeUndefined();
@@ -38,7 +38,7 @@ describe('buildManifest', () => {
 
 describe('validateManifest', () => {
   const validManifest = () => ({
-    exportVersion: 1,
+    exportVersion: EXPORT_VERSION,
     applicationVersion: '0.1.0',
     createdAt: 'x',
     documents: [
@@ -56,7 +56,7 @@ describe('validateManifest', () => {
   });
 
   it('accepts a valid manifest', () => {
-    expect(validateManifest(validManifest())).toEqual({ documentCount: 1, fileCount: 1 });
+    expect(validateManifest(validManifest())).toEqual({ documentCount: 1, rootCount: 1, fileCount: 1 });
   });
 
   it.each([
@@ -111,7 +111,7 @@ describe('export → import round trip', () => {
     await deleteDatabase();
 
     const parsed = await parseArchive(blob);
-    expect(parsed.summary).toEqual({ documentCount: 1, fileCount: 1 });
+    expect(parsed.summary).toEqual({ documentCount: 1, rootCount: 1, fileCount: 1 });
     const { imported } = await restoreArchive(parsed);
     expect(imported).toBe(1);
 
@@ -156,7 +156,7 @@ describe('export → import round trip', () => {
     zip.file(
       'manifest.json',
       JSON.stringify({
-        exportVersion: 1,
+        exportVersion: EXPORT_VERSION,
         documents: [
           {
             id: 'd1',

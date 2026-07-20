@@ -49,8 +49,10 @@ export function ImportDialog({ open, onClose, onImported }) {
     setImporting(true);
     setError(null);
     try {
-      const { imported } = await restoreArchive(parsed);
-      onImported(imported);
+      // Report uploads, not records: "4 documents" for one three-page PDF
+      // would not match anything the user sees in the sidebar.
+      const { rootCount } = await restoreArchive(parsed);
+      onImported(rootCount);
       onClose();
     } catch (err) {
       setError(toAppError(err));
@@ -108,10 +110,14 @@ export function ImportDialog({ open, onClose, onImported }) {
             className="rounded-md border border-success-edge bg-success-soft px-3 py-2.5 text-[13px] text-success"
             role="status"
           >
-            Archive is valid: {parsed.summary.documentCount}{' '}
-            {parsed.summary.documentCount === 1 ? 'document' : 'documents'} and{' '}
-            {parsed.summary.fileCount} original {parsed.summary.fileCount === 1 ? 'file' : 'files'}.
-            Documents that already exist here will be imported as copies.
+            Archive is valid: {parsed.summary.rootCount}{' '}
+            {parsed.summary.rootCount === 1 ? 'document' : 'documents'}
+            {parsed.summary.documentCount > parsed.summary.rootCount
+              ? ` (${parsed.summary.documentCount - parsed.summary.rootCount} pages)`
+              : ''}{' '}
+            and {parsed.summary.fileCount} original{' '}
+            {parsed.summary.fileCount === 1 ? 'file' : 'files'}. Documents that already exist here
+            will be imported as copies.
           </div>
         ) : null}
 
