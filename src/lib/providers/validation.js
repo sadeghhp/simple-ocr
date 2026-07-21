@@ -17,23 +17,28 @@ export function emptyProviderConfig() {
   };
 }
 
-/** True when an endpoint looks like a base URL rather than an API path. */
-export function needsCompletionsPath(endpoint) {
-  try {
-    return !/completions|responses|generate/i.test(new URL(endpoint).pathname);
-  } catch {
-    return false;
-  }
+/** True when a URL's path already looks like a specific completions/generate endpoint. */
+function looksLikeCompletionsPath(pathname) {
+  return /completions|responses|generate/i.test(pathname);
 }
 
-/** Suggest the conventional chat completions path for a base URL. */
-export function suggestCompletionsUrl(endpoint) {
+/**
+ * Build the actual request URL from the configured base URL (spec: standard
+ * "base URL" form, e.g. `http://localhost:1234/v1`, matching how other
+ * OpenAI-compatible tools take provider config). `/chat/completions` is
+ * appended automatically. Configs saved before this change may already store
+ * a full completions URL, so an existing completions-shaped path is left
+ * untouched rather than doubled up.
+ */
+export function buildCompletionsUrl(endpoint) {
+  const trimmed = (endpoint || '').trim().replace(/\/+$/, '');
   try {
-    const url = new URL(endpoint);
+    const url = new URL(trimmed);
+    if (looksLikeCompletionsPath(url.pathname)) return trimmed;
     url.pathname = `${url.pathname.replace(/\/+$/, '')}/chat/completions`;
     return url.toString();
   } catch {
-    return `${endpoint.replace(/\/+$/, '')}/chat/completions`;
+    return `${trimmed}/chat/completions`;
   }
 }
 
@@ -68,15 +73,6 @@ export function validateProviderConfig(config) {
         url.hostname !== '127.0.0.1'
       ) {
         notes.push('This endpoint is not HTTPS. The API key will travel unencrypted.');
-      }
-      // A base URL here returns the provider's web page instead of an API
-      // response, which is confusing to diagnose after the fact.
-      if (!errors.endpoint && needsCompletionsPath(endpoint)) {
-        notes.push(
-          `This looks like a base URL, not a chat completions endpoint. Try ${suggestCompletionsUrl(
-            endpoint
-          )}`
-        );
       }
       if (notes.length > 0) warnings.endpoint = notes.join(' ');
     }

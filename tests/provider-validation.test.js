@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildCompletionsUrl,
   emptyProviderConfig,
   isProviderConfigured,
-  suggestCompletionsUrl,
   validateProviderConfig,
 } from '@/lib/providers/validation';
 
 const valid = () => ({
   ...emptyProviderConfig(),
-  endpoint: 'https://api.example.com/v1/chat/completions',
+  endpoint: 'http://localhost:1234/v1',
   model: 'gpt-4o-mini',
   apiKey: 'sk-test',
 });
@@ -47,33 +47,35 @@ describe('validateProviderConfig', () => {
     expect(local.warnings).toEqual({});
   });
 
-  it('warns when the endpoint is a base URL and suggests the completions path', () => {
+  it('accepts a plain base URL with no path, the standard custom-LLM form', () => {
     const { errors, warnings } = validateProviderConfig({
       ...valid(),
       endpoint: 'https://openrouter.ai/api/v1',
     });
-    // A base URL is still savable — custom gateways vary — but it is flagged.
     expect(errors).toEqual({});
-    expect(warnings.endpoint).toContain('https://openrouter.ai/api/v1/chat/completions');
+    expect(warnings).toEqual({});
   });
 
-  it('does not warn about paths that already look like an API endpoint', () => {
+  it('buildCompletionsUrl appends /chat/completions to a base URL without duplicating slashes', () => {
+    expect(buildCompletionsUrl('https://openrouter.ai/api/v1')).toBe(
+      'https://openrouter.ai/api/v1/chat/completions'
+    );
+    expect(buildCompletionsUrl('https://openrouter.ai/api/v1/')).toBe(
+      'https://openrouter.ai/api/v1/chat/completions'
+    );
+    expect(buildCompletionsUrl('http://localhost:1234/v1')).toBe(
+      'http://localhost:1234/v1/chat/completions'
+    );
+  });
+
+  it('buildCompletionsUrl leaves an already-complete completions URL untouched', () => {
     for (const endpoint of [
       'https://openrouter.ai/api/v1/chat/completions',
       'https://api.openai.com/v1/responses',
       'https://generativelanguage.googleapis.com/v1beta/models/x:generateContent',
     ]) {
-      expect(validateProviderConfig({ ...valid(), endpoint }).warnings.endpoint).toBeUndefined();
+      expect(buildCompletionsUrl(endpoint)).toBe(endpoint);
     }
-  });
-
-  it('suggestCompletionsUrl appends the path without duplicating slashes', () => {
-    expect(suggestCompletionsUrl('https://openrouter.ai/api/v1')).toBe(
-      'https://openrouter.ai/api/v1/chat/completions'
-    );
-    expect(suggestCompletionsUrl('https://openrouter.ai/api/v1/')).toBe(
-      'https://openrouter.ai/api/v1/chat/completions'
-    );
   });
 
   it('flags extra headers with a value but no name', () => {

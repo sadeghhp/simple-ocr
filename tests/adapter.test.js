@@ -5,6 +5,7 @@ import {
   extractProviderError,
   parseResponse,
   runOcr,
+  testProviderConnection,
 } from '@/lib/providers/adapter';
 import { emptyProviderConfig } from '@/lib/providers/validation';
 
@@ -276,7 +277,20 @@ describe('runOcr', () => {
     expect(thrown.detail).toContain('Requested model: test-model');
   });
 
-  it('hints about the endpoint path when the URL looks wrong', async () => {
+  it('builds the request against the base URL plus /chat/completions', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      okResponse({ choices: [{ message: { content: 'hi' } }] })
+    );
+    await runOcr(
+      pngBlob(),
+      { mimeType: 'image/png', name: 'a.png' },
+      { ...config(), endpoint: 'https://openrouter.ai/api/v1' },
+      { fetchImpl }
+    );
+    expect(fetchImpl.mock.calls[0][0]).toBe('https://openrouter.ai/api/v1/chat/completions');
+  });
+
+  it('reports the resolved request URL in a network-failure detail', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
     let thrown;
     try {
@@ -290,6 +304,40 @@ describe('runOcr', () => {
       thrown = err;
     }
     expect(thrown.code).toBe('NETWORK_ERROR');
-    expect(thrown.hint).toContain('/chat/completions');
+    expect(thrown.detail).toContain('https://openrouter.ai/api/v1/chat/completions');
+  });
+});
+
+describe('testProviderConnection', () => {
+  it('sends a minimal text-only request and reports the model and reply', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      okResponse({ model: 'test-model', choices: [{ message: { content: 'ok' } }] })
+    );
+    const result = await testProviderConnection(config(), { fetchImpl });
+    expect(result.ok).toBe(true);
+    expect(result.model).toBe('test-model');
+    expect(result.reply).toBe('ok');
+    expect(typeof result.elapsedMs).toBe('number');
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('https://api.example.com/v1/chat/completions');
+    const body = JSON.parse(init.body);
+    expect(body.response_format).toBeUndefined();
+    expect(body.messages[1].content).toEqual([
+      { type: 'text', text: 'Reply with only the single word: ok' },
+    ]);
+  });
+
+  it('surfaces a classified error when the provider rejects the request', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('nope', { status: 401 }));
+    await expect(testProviderConnection(config(), { fetchImpl })).rejects.toMatchObject({
+      code: 'AUTHENTICATION_FAILED',
+    });
+  });
+
+  it('throws PROVIDER_NOT_CONFIGURED without a config', async () => {
+    await expect(testProviderConnection(null)).rejects.toMatchObject({
+      code: 'PROVIDER_NOT_CONFIGURED',
+    });
   });
 });

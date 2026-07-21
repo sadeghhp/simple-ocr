@@ -8,7 +8,11 @@
  */
 import { AppError, ERROR_CODES, toAppError } from '@/lib/errors';
 import { blobToBase64, blobToDataUrl, blobToText } from '@/lib/files/convert';
-import { DEFAULT_OCR_INSTRUCTION, assertProviderConfigured } from '@/lib/providers/validation';
+import {
+  DEFAULT_OCR_INSTRUCTION,
+  assertProviderConfigured,
+  buildCompletionsUrl,
+} from '@/lib/providers/validation';
 import { buildSystemMessages } from '@/lib/extraction/prompt';
 import { parseExtractionPayload } from '@/lib/extraction/parse';
 import { coerceExtraction, degradedExtraction } from '@/lib/extraction/coerce';
@@ -262,27 +266,16 @@ const ENDPOINT_HINT_CODES = new Set([
   ERROR_CODES.INVALID_RESPONSE,
 ]);
 
-/** Flag an endpoint that is missing the chat completions path — a common slip. */
-function endpointHint(endpoint) {
-  try {
-    const { pathname } = new URL(endpoint);
-    if (!/completions|responses|generate/i.test(pathname)) {
-      return `The endpoint path is "${pathname}". An OpenAI-compatible endpoint usually ends with /chat/completions.`;
-    }
-  } catch {
-    /* validated elsewhere */
-  }
-  return null;
-}
-
 /** One request/response cycle. Returns `{ text, payload }` or throws an AppError. */
 async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode }) {
-  const endpoint = config.endpoint.trim();
+  // config.endpoint stores the base URL (e.g. http://localhost:1234/v1); the
+  // request goes to its /chat/completions path.
+  const requestUrl = buildCompletionsUrl(config.endpoint.trim());
   const { headers, body } = buildRequest(config, contentParts, { jsonMode });
 
   let response;
   try {
-    response = await fetchImpl(endpoint, {
+    response = await fetchImpl(requestUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
@@ -302,12 +295,10 @@ async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode })
     throw new AppError(ERROR_CODES.NETWORK_ERROR, err?.message || 'Request failed', {
       retryable: true,
       cause: err,
-      detail: `The browser could not complete the request to ${endpoint}.\nReported by the browser: ${
+      detail: `The browser could not complete the request to ${requestUrl}.\nReported by the browser: ${
         err?.message || 'no detail'
       }`,
-      hint:
-        endpointHint(endpoint) ||
-        'The browser cannot tell a network failure apart from a CORS rejection. Confirm the endpoint URL is reachable and allows browser requests.',
+      hint: 'The browser cannot tell a network failure apart from a CORS rejection. Confirm the base URL is reachable and the provider allows browser (CORS) requests.',
     });
   }
 
@@ -319,10 +310,10 @@ async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode })
       /* body unavailable */
     }
     const error = errorFromHttpStatus(response.status, bodyText);
-    // Only add the endpoint hint where the URL is a plausible cause; codes like
-    // AUTHENTICATION_FAILED have better advice of their own.
+    // Only add the base-URL hint where the URL is a plausible cause; codes
+    // like AUTHENTICATION_FAILED have better advice of their own.
     if (!error.hint && ENDPOINT_HINT_CODES.has(error.code)) {
-      error.hint = endpointHint(endpoint);
+      error.hint = `Requested ${requestUrl}. Confirm the base URL in provider settings is correct.`;
     }
     throw error;
   }
@@ -335,13 +326,11 @@ async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode })
     throw new AppError(ERROR_CODES.NOT_JSON_RESPONSE, 'Provider response was not JSON', {
       retryable: true,
       cause: err,
-      detail: `HTTP ${response.status} from ${endpoint}, but the body is not JSON.\nBody received: ${truncate(
+      detail: `HTTP ${response.status} from ${requestUrl}, but the body is not JSON.\nBody received: ${truncate(
         bodyText,
         300
       )}`,
-      hint:
-        endpointHint(endpoint) ||
-        'A non-JSON reply usually means the URL points at a web page or proxy rather than the API.',
+      hint: 'A non-JSON reply usually means the base URL points at a web page or proxy rather than the API.',
     });
   }
 
@@ -418,5 +407,27 @@ export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch, signal
       usage: payload?.usage ?? null,
       finishReason: payload?.choices?.[0]?.finish_reason ?? null,
     },
+  };
+}
+
+/**
+ * Send a minimal, text-only chat-completions request to confirm the base URL,
+ * model, and credentials actually work, without touching any document.
+ * Returns `{ ok: true, model, reply, elapsedMs }` or throws the same
+ * classified AppError that runOcr would.
+ */
+export async function testProviderConnection(config, { fetchImpl = fetch, signal = null } = {}) {
+  assertProviderConfigured(config);
+  const contentParts = [
+    { type: 'text', text: 'Reply with only the single word: ok' },
+  ];
+  const startedAt = Date.now();
+  const result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode: false });
+
+  return {
+    ok: true,
+    model: result.payload?.model || config.model,
+    reply: result.text.trim(),
+    elapsedMs: Date.now() - startedAt,
   };
 }

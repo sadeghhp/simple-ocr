@@ -5,12 +5,8 @@ import { Button, IconButton } from '@/components/common/Button';
 import { Dialog } from '@/components/common/Dialog';
 import { TextArea, TextInput } from '@/components/common/Field';
 import { CloseIcon } from '@/components/common/icons';
-import {
-  emptyProviderConfig,
-  needsCompletionsPath,
-  suggestCompletionsUrl,
-  validateProviderConfig,
-} from '@/lib/providers/validation';
+import { emptyProviderConfig, validateProviderConfig } from '@/lib/providers/validation';
+import { testProviderConnection } from '@/lib/providers/adapter';
 
 /**
  * Provider settings (spec §25.2). One active custom configuration; states
@@ -22,6 +18,7 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
   const [attempted, setAttempted] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
+  const [testState, setTestState] = useState({ status: 'idle', message: null });
 
   useEffect(() => {
     if (open) {
@@ -31,6 +28,7 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
       setValidation(config ? validateProviderConfig(next) : { errors: {}, warnings: {} });
       setAttempted(false);
       setSaveError(null);
+      setTestState({ status: 'idle', message: null });
     }
   }, [open, config]);
 
@@ -38,6 +36,28 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
     const next = { ...draft, [field]: event.target.value };
     setDraft(next);
     setValidation(validateProviderConfig(next));
+    setTestState({ status: 'idle', message: null });
+  };
+
+  const runTest = async () => {
+    const result = validateProviderConfig(draft);
+    setValidation(result);
+    setAttempted(true);
+    if (Object.keys(result.errors).length > 0) return;
+    setTestState({ status: 'testing', message: null });
+    try {
+      const { model, reply, elapsedMs } = await testProviderConnection({
+        ...draft,
+        endpoint: draft.endpoint.trim(),
+        model: draft.model.trim(),
+      });
+      setTestState({
+        status: 'success',
+        message: `Connected in ${elapsedMs}ms. Model "${model}" replied: "${reply}".`,
+      });
+    } catch (err) {
+      setTestState({ status: 'error', message: err?.message || 'Connection test failed.' });
+    }
   };
 
   const setHeader = (index, field, value) => {
@@ -69,9 +89,6 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
   };
 
   const { errors, warnings } = validation;
-  const suggestedEndpoint = needsCompletionsPath(draft.endpoint)
-    ? suggestCompletionsUrl(draft.endpoint)
-    : null;
 
   return (
     <Dialog
@@ -105,31 +122,17 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
           onChange={set('name')}
           hint="A label for your own reference."
         />
-        <div className="space-y-1.5">
-          <TextInput
-            label="API endpoint"
-            placeholder="https://api.example.com/v1/chat/completions"
-            value={draft.endpoint}
-            onChange={set('endpoint')}
-            error={attempted ? errors.endpoint : undefined}
-            warning={warnings.endpoint}
-            hint="The full chat completions URL, e.g. https://openrouter.ai/api/v1/chat/completions. The endpoint must allow browser (CORS) requests."
-            autoComplete="off"
-            spellCheck={false}
-          />
-          {suggestedEndpoint ? (
-            <Button
-              size="sm"
-              onClick={() => {
-                const next = { ...draft, endpoint: suggestedEndpoint };
-                setDraft(next);
-                setValidation(validateProviderConfig(next));
-              }}
-            >
-              Use {suggestedEndpoint}
-            </Button>
-          ) : null}
-        </div>
+        <TextInput
+          label="API endpoint"
+          placeholder="http://localhost:1234/v1"
+          value={draft.endpoint}
+          onChange={set('endpoint')}
+          error={attempted ? errors.endpoint : undefined}
+          warning={warnings.endpoint}
+          hint="The base URL of an OpenAI-compatible API, e.g. http://localhost:1234/v1 or https://api.openai.com/v1. /chat/completions is added automatically. The endpoint must allow browser (CORS) requests."
+          autoComplete="off"
+          spellCheck={false}
+        />
         <TextInput
           label="Model"
           placeholder="e.g. gpt-4o-mini"
@@ -148,6 +151,22 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
           hint="Sent as an Authorization: Bearer header. Never included in exports."
           autoComplete="off"
         />
+
+        <div className="space-y-1.5">
+          <Button size="sm" onClick={runTest} disabled={testState.status === 'testing'}>
+            {testState.status === 'testing' ? 'Testing…' : 'Test connection'}
+          </Button>
+          {testState.status === 'success' ? (
+            <p className="text-[13px] text-success" role="status">
+              {testState.message}
+            </p>
+          ) : null}
+          {testState.status === 'error' ? (
+            <p className="text-[13px] text-danger" role="alert">
+              {testState.message}
+            </p>
+          ) : null}
+        </div>
 
         <div className="space-y-1.5">
           <span className="block text-[13px] font-medium text-ink">
