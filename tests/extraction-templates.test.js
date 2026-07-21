@@ -121,11 +121,11 @@ describe('buildSystemPrompt', () => {
     expect(prompt.indexOf('  fields')).toBeLessThan(prompt.indexOf('  rawText'));
   });
 
-  it('appends the user instruction instead of replacing the contract', () => {
+  it('appends the user instruction instead of replacing the contract, in a single system message', () => {
     const messages = buildSystemMessages('Prefer Farsi transliteration.');
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(1);
     expect(messages[0].content).toContain('documentType');
-    expect(messages[1].content).toContain('Prefer Farsi transliteration.');
+    expect(messages[0].content).toContain('Prefer Farsi transliteration.');
 
     expect(buildSystemMessages('   ')).toHaveLength(1);
     expect(buildSystemMessages(null)).toHaveLength(1);

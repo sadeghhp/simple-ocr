@@ -104,15 +104,15 @@ export function buildSystemPrompt() {
  *
  * The user's own OCR instruction is *appended* rather than substituted: it
  * refines how the page is read, but replacing the contract would leave the
- * response unparseable.
+ * response unparseable. Always a single message: some gateways forward
+ * `system` turns as `user` turns for models with no native system role, and
+ * two consecutive system messages would then become two consecutive user
+ * turns, tripping strict user/assistant alternation checks.
  */
 export function buildSystemMessages(userInstruction) {
-  const messages = [{ role: 'system', content: buildSystemPrompt() }];
   const extra = (userInstruction || '').trim();
-  if (extra) {
-    messages.push({ role: 'system', content: `Additional instructions:\n${extra}` });
-  }
-  return messages;
+  const content = extra ? `${buildSystemPrompt()}\n\nAdditional instructions:\n${extra}` : buildSystemPrompt();
+  return [{ role: 'system', content }];
 }
 
 export const __testing = { describeField, describeTemplate };
