@@ -102,11 +102,17 @@ export function buildRequest(config, contentParts, { jsonMode = true, apiStyle =
   }
   const systemMessages = buildSystemMessages(customInstruction(config));
   const jsonModeEnabled = jsonMode && config.supportsJsonMode !== false;
+  const useUserPrompt = config.promptMode !== 'system';
+  const userContent = useUserPrompt
+    ? [{ type: 'text', text: `${systemMessages[0].content}\n\n` }, ...contentParts]
+    : contentParts;
 
   if (apiStyle === 'responses') {
     const body = {
       model: config.model,
-      input: [...systemMessages, { role: 'user', content: toResponsesContentParts(contentParts) }],
+      input: useUserPrompt
+        ? [{ role: 'user', content: toResponsesContentParts(userContent) }]
+        : [...systemMessages, { role: 'user', content: toResponsesContentParts(contentParts) }],
     };
     // Same "send it, withdraw it on rejection" strategy as response_format below.
     if (jsonModeEnabled) body.text = { format: { type: 'json_object' } };
@@ -115,7 +121,9 @@ export function buildRequest(config, contentParts, { jsonMode = true, apiStyle =
 
   const body = {
     model: config.model,
-    messages: [...systemMessages, { role: 'user', content: contentParts }],
+    messages: useUserPrompt
+      ? [{ role: 'user', content: userContent }]
+      : [...systemMessages, { role: 'user', content: contentParts }],
   };
   // Many OpenAI-compatible gateways reject response_format outright, so this is
   // sent optimistically and withdrawn on the one-shot downgrade in runOcr.

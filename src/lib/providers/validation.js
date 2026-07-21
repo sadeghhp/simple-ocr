@@ -14,6 +14,9 @@ export function emptyProviderConfig() {
     apiKey: '',
     headers: [],
     instruction: DEFAULT_OCR_INSTRUCTION,
+    // Strict vLLM chat templates may reject system messages or require every
+    // prompt turn to be represented as one user message.
+    promptMode: 'user',
   };
 }
 

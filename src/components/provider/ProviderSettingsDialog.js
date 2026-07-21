@@ -219,8 +219,31 @@ export function ProviderSettingsDialog({ open, onClose, config, onSave, onDelete
           rows={3}
           value={draft.instruction}
           onChange={set('instruction')}
-          hint="Sent as the system prompt with every OCR request."
+          hint={
+            draft.promptMode === 'system'
+              ? 'Sent as a system prompt with every OCR request.'
+              : 'Combined with the image or document in one user message.'
+          }
         />
+
+        <div className="space-y-1.5">
+          <label htmlFor="provider-prompt-mode" className="block text-[13px] font-medium text-ink">
+            Prompt format
+          </label>
+          <select
+            id="provider-prompt-mode"
+            value={draft.promptMode}
+            onChange={set('promptMode')}
+            className="h-9 w-full rounded-md border border-edge-strong bg-panel px-3 text-sm text-ink focus:outline-2 focus:outline-offset-1 focus:outline-accent"
+          >
+            <option value="user">Single user message (strict vLLM/OCR models)</option>
+            <option value="system">System + user messages (standard chat APIs)</option>
+          </select>
+          <p className="text-[13px] text-ink-faint">
+            Use the single-user format for deployments that report “conversation roles must
+            alternate”.
+          </p>
+        </div>
 
         {saveError ? <p className="text-[13px] text-danger">{saveError}</p> : null}
 

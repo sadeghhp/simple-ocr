@@ -16,6 +16,7 @@ const config = () => ({
   model: 'test-model',
   apiKey: 'sk-test',
   headers: [{ name: 'X-Custom', value: 'yes' }],
+  promptMode: 'system',
 });
 
 const pngBlob = () => new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' });
@@ -39,6 +40,18 @@ describe('buildRequest', () => {
   it('omits Authorization without an API key', () => {
     const { headers } = buildRequest({ ...config(), apiKey: '' }, []);
     expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('uses one combined user message for strict vLLM/OCR deployments', () => {
+    const { body } = buildRequest(
+      { ...config(), promptMode: 'user' },
+      [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }]
+    );
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0].role).toBe('user');
+    expect(body.messages[0].content[0].type).toBe('text');
+    expect(body.messages[0].content[0].text).toContain('You read a single page image');
+    expect(body.messages[0].content[1].type).toBe('image_url');
   });
 });
 
@@ -347,6 +360,7 @@ describe('Responses API (auto-detected from the endpoint URL)', () => {
   const responsesConfig = () => ({
     ...config(),
     endpoint: 'https://api.example.com/v1/responses',
+    promptMode: 'system',
   });
 
   it('builds an `input` body with input_text/input_image parts and text.format instead of messages/response_format', () => {
@@ -374,6 +388,24 @@ describe('Responses API (auto-detected from the endpoint URL)', () => {
       jsonMode: false,
     });
     expect(body.text).toBeUndefined();
+  });
+
+  it('collapses to a single user input turn for strict vLLM/OCR deployments', () => {
+    const parts = [
+      { type: 'text', text: 'Extract the text from this image.' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+    ];
+    const { body } = buildRequest({ ...responsesConfig(), promptMode: 'user' }, parts, {
+      apiStyle: 'responses',
+    });
+    expect(body.input).toHaveLength(1);
+    expect(body.input[0].role).toBe('user');
+    expect(body.input[0].content[0].type).toBe('input_text');
+    expect(body.input[0].content[0].text).toContain('You read a single page image');
+    expect(body.input[0].content.at(-1)).toEqual({
+      type: 'input_image',
+      image_url: 'data:image/png;base64,AA==',
+    });
   });
 
   it('parseResponse reads output_text when present', () => {
