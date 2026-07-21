@@ -86,5 +86,12 @@ export function useDebouncedSave(save, delay = 800) {
     [run]
   );
 
-  return { queue, flush, cancel, state, setState };
+  /**
+   * Whether an edit is queued but not yet written. Callers that re-sync an
+   * editor from the database use this to avoid overwriting what the user is
+   * still typing.
+   */
+  const isPending = useCallback(() => pending.current !== null, []);
+
+  return { queue, flush, cancel, isPending, state, setState };
 }

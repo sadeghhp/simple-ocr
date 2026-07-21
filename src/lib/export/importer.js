@@ -57,7 +57,14 @@ export function validateManifest(manifest) {
     if (!isSupportedMimeType(file.mimeType)) {
       fail(`File "${file.name || file.id}" has an unsupported type: ${file.mimeType}.`);
     }
-    if (typeof file.size === 'number' && file.size > MAX_FILE_BYTES) {
+    // `size` is required, not optional. An archive that simply omits it would
+    // otherwise skip the limit entirely, and the declared size is what bounds
+    // decompression below — DEFLATE compresses zeros ~1000:1, so an
+    // unbounded entry turns a 31 KB archive into gigabytes of ArrayBuffer.
+    if (typeof file.size !== 'number' || !Number.isFinite(file.size) || file.size < 0) {
+      fail(`File "${file.name || file.id}" has no valid size.`);
+    }
+    if (file.size > MAX_FILE_BYTES) {
       fail(`File "${file.name || file.id}" exceeds the maximum size.`);
     }
     fileIds.add(file.id);
@@ -234,7 +241,35 @@ export async function restoreArchive({ manifest, zip }) {
   // Pass 2 — write each distinct blob exactly once, never once per document.
   try {
     for (const file of manifest.files) {
-      const binary = await zip.file(`files/${file.id}`).async('arraybuffer');
+      const entry = zip.file(`files/${file.id}`);
+      if (!entry) {
+        throw new AppError(
+          ERROR_CODES.IMPORT_INVALID,
+          `The archive is missing the data for "${file.name || file.id}".`,
+          { hint: 'The archive is incomplete. Re-export it and try again.' }
+        );
+      }
+      // Check the central directory's uncompressed size BEFORE inflating.
+      // Verifying after the fact is too late: the allocation that would
+      // exhaust memory has already happened.
+      const declared = entry._data?.uncompressedSize;
+      if (typeof declared === 'number' && declared > file.size) {
+        throw new AppError(
+          ERROR_CODES.IMPORT_INVALID,
+          `File "${file.name || file.id}" is larger than the manifest declares.`,
+          { hint: 'The archive is inconsistent and was not imported.' }
+        );
+      }
+      const binary = await entry.async('arraybuffer');
+      // A zip whose central directory lies about the size still gets caught,
+      // just after the fact rather than before it.
+      if (binary.byteLength !== file.size) {
+        throw new AppError(
+          ERROR_CODES.IMPORT_INVALID,
+          `File "${file.name || file.id}" does not match its declared size.`,
+          { hint: 'The archive is inconsistent and was not imported.' }
+        );
+      }
       // validateManifest guarantees the type is allowlisted and agrees with
       // every document pointing at it.
       const blob = new Blob([binary], { type: file.mimeType });

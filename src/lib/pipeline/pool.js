@@ -83,11 +83,19 @@ export async function runPool(
     try {
       return { item, index, value: await worker(item, index), error: null };
     } catch (error) {
-      if (isRateLimited(error)) {
+      // Only the first attempt narrows: letting the retry narrow again lets a
+      // single page quarter the pool for every page still queued behind it.
+      if (isRateLimited(error) && !isRetry) {
         // Narrow for everything still queued, then give this page one more go.
         activeLimit = Math.max(1, Math.floor(activeLimit / 2));
-        if (!isRetry && !signal?.aborted) {
-          await sleep(rateLimitBackoffMs);
+        if (!signal?.aborted) {
+          // `sleep` is injectable, so it is not assumed to resolve. A rejecting
+          // backoff must still produce a result record, or the pool stalls.
+          try {
+            await sleep(rateLimitBackoffMs);
+          } catch {
+            return { item, index, value: null, error };
+          }
           if (!signal?.aborted) return attempt(item, index, true);
         }
       }
@@ -119,15 +127,28 @@ export async function runPool(
             })
           : attempt(list[index], index, false);
 
-        task.then((result) => {
+        // Bookkeeping runs on both settle paths. `attempt` is written not to
+        // reject, but a rejection here would decrement nothing and leave the
+        // outer promise pending forever — the pool would hang with no error.
+        const settle = (result) => {
           results[index] = result;
           running -= 1;
           done += 1;
-          if (onProgress && !isCancelled(result.error)) {
-            onProgress({ done, total: list.length, item: result.item });
+          try {
+            if (onProgress && !isCancelled(result.error)) {
+              onProgress({ done, total: list.length, item: result.item });
+            }
+          } catch {
+            // A throwing progress callback is the caller's problem, not a
+            // reason to abandon every page still queued.
+          } finally {
+            pump();
           }
-          pump();
-        });
+        };
+
+        task.then(settle, (error) =>
+          settle({ item: list[index], index, value: null, error })
+        );
       }
     };
     pump();

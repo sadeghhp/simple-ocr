@@ -64,6 +64,7 @@ export function ExtractionPanel({
     queue,
     flush,
     cancel,
+    isPending,
     state: saveState,
     setState: setSaveState,
   } = useDebouncedSave(async (value, documentId) => {
@@ -77,6 +78,7 @@ export function ExtractionPanel({
     queue: queueFields,
     flush: flushFields,
     cancel: cancelFields,
+    isPending: isFieldsPending,
     state: fieldsSaveState,
     setState: setFieldsSaveState,
   } = useDebouncedSave(async (value, documentId) => {
@@ -84,8 +86,8 @@ export function ExtractionPanel({
     onDocumentChanged?.();
   });
 
-  // Sync the editor when a different document is selected or a new extraction
-  // arrives. Any edit still pending is written first, against its own id.
+  // Selection changed: write out any edit still pending (against its own id)
+  // and reset the editor to the newly selected document.
   const docId = doc?.id ?? null;
   useEffect(() => {
     flush();
@@ -96,7 +98,25 @@ export function ExtractionPanel({
     setSaveState(SAVE_STATE.idle);
     setFieldsSaveState(SAVE_STATE.idle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docId, doc?.processedAt]);
+  }, [docId]);
+
+  // A new extraction arrived for the document already on screen.
+  //
+  // This keys on `updatedAt`, not `processedAt`: a multi-page parent's results
+  // are written by refreshParentStatus, which never sets `processedAt`. Keying
+  // on it left the textarea showing '' for a document that had extracted fine,
+  // and the first keystroke then saved that empty string over the page text.
+  //
+  // Only re-sync when nothing is queued locally, so a refresh landing mid-edit
+  // cannot pull the text out from under whoever is typing.
+  const updatedAt = doc?.updatedAt ?? null;
+  useEffect(() => {
+    if (!isPending()) setText(doc?.editedText ?? '');
+    if (!isFieldsPending()) {
+      setFields(doc?.extractionEdited ?? doc?.extraction?.fields ?? null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, updatedAt]);
 
   useEffect(() => {
     setProcessError(doc?.processingError ?? null);

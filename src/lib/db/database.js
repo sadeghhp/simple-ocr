@@ -110,10 +110,22 @@ export function openDatabase() {
       return;
     }
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+    // `onblocked` is not terminal: the request stays pending and still fires
+    // `onsuccess` once the other tab closes. Rejecting without tracking that
+    // would leave an untracked live connection behind, which then blocks
+    // "delete all data" from this tab forever.
+    let settled = false;
     request.onupgradeneeded = (event) =>
       upgrade(request.result, event.oldVersion, request.transaction);
     request.onsuccess = () => {
       const db = request.result;
+      if (settled) {
+        // We already reported the open as blocked and the caller moved on.
+        // Close so this orphan cannot hold the database open.
+        db.close();
+        return;
+      }
+      settled = true;
       dbInstance = db;
       // If another tab upgrades or deletes the database, close so it can proceed.
       db.onversionchange = () => {
@@ -123,10 +135,20 @@ export function openDatabase() {
       };
       resolve(db);
     };
-    request.onerror = () =>
+    request.onerror = () => {
+      if (settled) return;
+      settled = true;
       reject(toAppError(request.error, ERROR_CODES.STORAGE_ERROR));
-    request.onblocked = () =>
-      reject(new AppError(ERROR_CODES.STORAGE_ERROR, 'Database open was blocked by another tab'));
+    };
+    request.onblocked = () => {
+      if (settled) return;
+      settled = true;
+      reject(
+        new AppError(ERROR_CODES.STORAGE_ERROR, 'Database open was blocked by another tab', {
+          hint: 'Another tab has this app open on an older version. Close it and try again.',
+        })
+      );
+    };
   });
   dbPromise.catch(() => {
     dbPromise = null;

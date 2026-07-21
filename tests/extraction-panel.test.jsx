@@ -130,6 +130,78 @@ describe('ExtractionPanel tabs', () => {
     expect(screen.getByRole('button', { name: /Reset to extraction/ }).disabled).toBe(false);
   });
 
+  // Regression: a multi-page parent's results are written by
+  // refreshParentStatus, which never sets `processedAt`. Keying the editor
+  // sync on `processedAt` left the textarea empty for a document that had
+  // extracted fine, and the first keystroke saved that '' over the page text.
+  it('shows a multi-page parent’s text when its extraction lands without processedAt', async () => {
+    const parent = (overrides = {}) =>
+      doc({
+        id: 'parent-1',
+        name: 'invoice.pdf',
+        kind: 'parent',
+        pageNumber: null,
+        processedAt: null,
+        updatedAt: '2026-07-20T10:00:00.000Z',
+        ...overrides,
+      });
+
+    // Selected before extraction finishes: no text yet.
+    const { rerender } = render(
+      <ExtractionPanel
+        doc={parent({ status: 'processing', extractedText: null, editedText: null, extraction: null })}
+        providerConfigured
+        processing
+        onProcess={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onDocumentChanged={vi.fn()}
+      />
+    );
+
+    // Extraction completes. Same document id, same (null) processedAt — only
+    // updatedAt moves, exactly as refreshParentStatus leaves it.
+    rerender(
+      <ExtractionPanel
+        doc={parent({
+          status: 'completed',
+          extractedText: '--- Page 1 ---\njoined page text',
+          editedText: '--- Page 1 ---\njoined page text',
+          updatedAt: '2026-07-20T10:05:00.000Z',
+        })}
+        providerConfigured
+        processing={false}
+        onProcess={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onDocumentChanged={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Raw text' }));
+    expect(screen.getByRole('tabpanel').value).toBe('--- Page 1 ---\njoined page text');
+  });
+
+  it('does not pull text out from under an edit still being typed', async () => {
+    const base = doc({ updatedAt: '2026-07-20T10:00:00.000Z' });
+    const { rerender } = renderPanel({ doc: base });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Raw text' }));
+    fireEvent.change(screen.getByRole('tabpanel'), { target: { value: 'user is typing' } });
+
+    // A background refresh lands mid-edit. It must not clobber the draft.
+    rerender(
+      <ExtractionPanel
+        doc={doc({ updatedAt: '2026-07-20T10:00:05.000Z' })}
+        providerConfigured
+        processing={false}
+        onProcess={vi.fn()}
+        onOpenSettings={vi.fn()}
+        onDocumentChanged={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole('tabpanel').value).toBe('user is typing');
+  });
+
   it('offers Cancel only while processing', () => {
     const onCancel = vi.fn();
     const { unmount } = renderPanel({ onCancel });

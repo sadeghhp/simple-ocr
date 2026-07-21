@@ -166,7 +166,11 @@ export function classifyProviderError({ status = null, message = '', code = null
   if (/rate limit|too many requests/.test(text)) {
     return as(ERROR_CODES.RATE_LIMITED, { retryable: true });
   }
-  if (/does not support|not support (image|vision|file|pdf)|modality|unsupported (image|file|input)|no vision/.test(text)) {
+  if (
+    /does not support|not support (image|vision|file|pdf)|modality|unsupported (image|file|input)|no vision|at most 0 image/.test(
+      text
+    )
+  ) {
     return as(ERROR_CODES.MODEL_REJECTED_INPUT);
   }
   if (/content filter|safety|blocked|prohibited/.test(text)) {
@@ -266,85 +270,181 @@ const ENDPOINT_HINT_CODES = new Set([
   ERROR_CODES.INVALID_RESPONSE,
 ]);
 
+/**
+ * A provider that accepts the connection and never answers would otherwise
+ * pin a page in `processing` forever — and at DEFAULT_CONCURRENCY = 1 that
+ * blocks every remaining page of the document behind it.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 120000;
+
+/**
+ * Combine the caller's cancel signal with a deadline.
+ *
+ * The two are tracked separately on purpose: a timeout must be reported as a
+ * retryable network failure, never as a cancellation the user never asked for.
+ * `timedOut()` is what tells the two aborts apart after the fact.
+ */
+function createDeadline(callerSignal, timeoutMs) {
+  // Without AbortController there is no way to enforce a deadline; the request
+  // still runs, it just cannot be cut short.
+  if (typeof AbortController === 'undefined') {
+    return { signal: callerSignal, timedOut: () => false, cleanup: () => {} };
+  }
+  const controller = new AbortController();
+  let timedOut = false;
+  const onCallerAbort = () => controller.abort();
+  if (callerSignal) {
+    if (callerSignal.aborted) controller.abort();
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+  return {
+    signal: controller.signal,
+    timedOut: () => timedOut,
+    cleanup: () => {
+      if (timer) clearTimeout(timer);
+      callerSignal?.removeEventListener?.('abort', onCallerAbort);
+    },
+  };
+}
+
 /** One request/response cycle. Returns `{ text, payload }` or throws an AppError. */
-async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode }) {
+async function attemptOcr(
+  contentParts,
+  config,
+  { fetchImpl, signal, jsonMode, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS }
+) {
   // config.endpoint stores the base URL (e.g. http://localhost:1234/v1); the
   // request goes to its /chat/completions path.
   const requestUrl = buildCompletionsUrl(config.endpoint.trim());
   const { headers, body } = buildRequest(config, contentParts, { jsonMode });
 
-  let response;
-  try {
-    response = await fetchImpl(requestUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (err) {
-    // A cancelled request must not be reported as a network failure — telling
-    // someone to check their connection after they pressed Cancel is nonsense.
-    if (err?.name === 'AbortError' || signal?.aborted) {
-      throw new AppError(ERROR_CODES.PROCESSING_CANCELLED, 'Request was cancelled', {
-        cause: err,
+  // The deadline covers reading the body too, not just the response headers:
+  // a provider that streams one byte a minute is just as stuck.
+  const deadline = createDeadline(signal, timeoutMs);
+  const timedOutError = (err) =>
+    new AppError(
+      ERROR_CODES.NETWORK_ERROR,
+      `The provider did not respond within ${Math.round(timeoutMs / 1000)}s`,
+      {
         retryable: true,
+        cause: err,
+        detail: `No response from ${requestUrl} within ${timeoutMs}ms.`,
+        hint: 'The provider accepted the request but never answered. Check that the model is loaded and the endpoint is responding.',
+      }
+    );
+
+  try {
+    return await runRequest();
+  } finally {
+    deadline.cleanup();
+  }
+
+  async function runRequest() {
+    let response;
+    try {
+      response = await fetchImpl(requestUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: deadline.signal,
+      });
+    } catch (err) {
+      // The deadline elapsed. This is a provider/network problem, and it is
+      // worth retrying — reporting it as a cancellation would be a lie.
+      if (deadline.timedOut() && !signal?.aborted) throw timedOutError(err);
+      // A cancelled request must not be reported as a network failure — telling
+      // someone to check their connection after they pressed Cancel is nonsense.
+      if (err?.name === 'AbortError' || signal?.aborted) {
+        throw new AppError(ERROR_CODES.PROCESSING_CANCELLED, 'Request was cancelled', {
+          cause: err,
+          retryable: true,
+        });
+      }
+      // fetch rejects with TypeError for both network failures and CORS
+      // blocks; the browser hides which one it was.
+      throw new AppError(ERROR_CODES.NETWORK_ERROR, err?.message || 'Request failed', {
+        retryable: true,
+        cause: err,
+        detail: `The browser could not complete the request to ${requestUrl}.\nReported by the browser: ${
+          err?.message || 'no detail'
+        }`,
+        hint: 'The browser cannot tell a network failure apart from a CORS rejection. Confirm the base URL is reachable and the provider allows browser (CORS) requests.',
       });
     }
-    // fetch rejects with TypeError for both network failures and CORS
-    // blocks; the browser hides which one it was.
-    throw new AppError(ERROR_CODES.NETWORK_ERROR, err?.message || 'Request failed', {
-      retryable: true,
-      cause: err,
-      detail: `The browser could not complete the request to ${requestUrl}.\nReported by the browser: ${
-        err?.message || 'no detail'
-      }`,
-      hint: 'The browser cannot tell a network failure apart from a CORS rejection. Confirm the base URL is reachable and the provider allows browser (CORS) requests.',
-    });
-  }
 
-  if (!response.ok) {
-    let bodyText = '';
+    if (!response.ok) {
+      let bodyText = '';
+      try {
+        bodyText = await response.text();
+      } catch {
+        /* body unavailable */
+      }
+      const error = errorFromHttpStatus(response.status, bodyText);
+      // Only add the base-URL hint where the URL is a plausible cause; codes
+      // like AUTHENTICATION_FAILED have better advice of their own.
+      if (!error.hint && ENDPOINT_HINT_CODES.has(error.code)) {
+        error.hint = `Requested ${requestUrl}. Confirm the base URL in provider settings is correct.`;
+      }
+      throw error;
+    }
+
+    // Reading the body can abort too — the deadline is still armed here, and a
+    // stalled stream aborts mid-read. Without this the raw DOMException would
+    // escape unclassified, and every caller expects an AppError.
+    let bodyText;
     try {
       bodyText = await response.text();
-    } catch {
-      /* body unavailable */
+    } catch (err) {
+      if (deadline.timedOut() && !signal?.aborted) throw timedOutError(err);
+      if (err?.name === 'AbortError' || signal?.aborted) {
+        throw new AppError(ERROR_CODES.PROCESSING_CANCELLED, 'Request was cancelled', {
+          cause: err,
+          retryable: true,
+        });
+      }
+      throw new AppError(ERROR_CODES.NETWORK_ERROR, 'The provider response was cut short', {
+        retryable: true,
+        cause: err,
+        detail: `HTTP ${response.status} from ${requestUrl}, but the body could not be read.\nReported by the browser: ${
+          err?.message || 'no detail'
+        }`,
+      });
     }
-    const error = errorFromHttpStatus(response.status, bodyText);
-    // Only add the base-URL hint where the URL is a plausible cause; codes
-    // like AUTHENTICATION_FAILED have better advice of their own.
-    if (!error.hint && ENDPOINT_HINT_CODES.has(error.code)) {
-      error.hint = `Requested ${requestUrl}. Confirm the base URL in provider settings is correct.`;
-    }
-    throw error;
-  }
 
-  const bodyText = await response.text();
-  let payload;
-  try {
-    payload = JSON.parse(bodyText);
-  } catch (err) {
-    throw new AppError(ERROR_CODES.NOT_JSON_RESPONSE, 'Provider response was not JSON', {
-      retryable: true,
-      cause: err,
-      detail: `HTTP ${response.status} from ${requestUrl}, but the body is not JSON.\nBody received: ${truncate(
-        bodyText,
-        300
-      )}`,
-      hint: 'A non-JSON reply usually means the base URL points at a web page or proxy rather than the API.',
-    });
-  }
-
-  let text;
-  try {
-    text = parseResponse(payload);
-  } catch (err) {
-    // Attach the model actually used so mismatches are obvious.
-    if (err instanceof AppError && err.detail) {
-      err.detail = `Requested model: ${config.model}\n${err.detail}`;
+    let payload;
+    try {
+      payload = JSON.parse(bodyText);
+    } catch (err) {
+      throw new AppError(ERROR_CODES.NOT_JSON_RESPONSE, 'Provider response was not JSON', {
+        retryable: true,
+        cause: err,
+        detail: `HTTP ${response.status} from ${requestUrl}, but the body is not JSON.\nBody received: ${truncate(
+          bodyText,
+          300
+        )}`,
+        hint: 'A non-JSON reply usually means the base URL points at a web page or proxy rather than the API.',
+      });
     }
-    throw err;
+
+    let text;
+    try {
+      text = parseResponse(payload);
+    } catch (err) {
+      // Attach the model actually used so mismatches are obvious.
+      if (err instanceof AppError && err.detail) {
+        err.detail = `Requested model: ${config.model}\n${err.detail}`;
+      }
+      throw err;
+    }
+    return { text, payload };
   }
-  return { text, payload };
 }
 
 /**
@@ -358,7 +458,12 @@ async function attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode })
  * a degraded extraction with a warning. Losing a good page of OCR because the
  * model wrapped it badly would be the worst outcome available.
  */
-export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch, signal = null } = {}) {
+export async function runOcr(
+  blob,
+  fileMeta,
+  config,
+  { fetchImpl = fetch, signal = null, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = {}
+) {
   assertProviderConfigured(config);
   const contentParts = await buildContentParts(blob, fileMeta.mimeType, fileMeta.name);
 
@@ -367,7 +472,7 @@ export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch, signal
   let result;
 
   try {
-    result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode });
+    result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode, timeoutMs });
   } catch (err) {
     if (!jsonMode || !looksLikeJsonModeRejection(err)) throw err;
     // The gateway does not understand response_format. Retry once without it
@@ -375,7 +480,12 @@ export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch, signal
     // not one per page.
     jsonMode = false;
     jsonModeRejected = true;
-    result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode: false });
+    result = await attemptOcr(contentParts, config, {
+      fetchImpl,
+      signal,
+      jsonMode: false,
+      timeoutMs,
+    });
   }
 
   const { text, payload } = result;
@@ -416,13 +526,23 @@ export async function runOcr(blob, fileMeta, config, { fetchImpl = fetch, signal
  * Returns `{ ok: true, model, reply, elapsedMs }` or throws the same
  * classified AppError that runOcr would.
  */
-export async function testProviderConnection(config, { fetchImpl = fetch, signal = null } = {}) {
+export async function testProviderConnection(
+  config,
+  // A shorter deadline than a real page: someone is sitting in front of the
+  // settings dialog waiting for this, and a one-word reply is not slow.
+  { fetchImpl = fetch, signal = null, timeoutMs = 30000 } = {}
+) {
   assertProviderConfigured(config);
   const contentParts = [
     { type: 'text', text: 'Reply with only the single word: ok' },
   ];
   const startedAt = Date.now();
-  const result = await attemptOcr(contentParts, config, { fetchImpl, signal, jsonMode: false });
+  const result = await attemptOcr(contentParts, config, {
+    fetchImpl,
+    signal,
+    jsonMode: false,
+    timeoutMs,
+  });
 
   return {
     ok: true,

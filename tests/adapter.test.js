@@ -115,6 +115,7 @@ describe('classifyProviderError', () => {
     ['No auth credentials found', null, 'AUTHENTICATION_FAILED'],
     ['Rate limit exceeded', null, 'RATE_LIMITED'],
     ['This model does not support image input', null, 'MODEL_REJECTED_INPUT'],
+    ['At most 0 image(s) may be provided in one prompt.', 400, 'MODEL_REJECTED_INPUT'],
     ['Request blocked by safety filters', null, 'CONTENT_FILTERED'],
     ['Upstream exploded', 503, 'PROVIDER_ERROR'],
   ])('maps %s to %s', (message, status, expected) => {

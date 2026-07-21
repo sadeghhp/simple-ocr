@@ -19,8 +19,10 @@ function stripFence(text) {
   const opening = /^```[a-zA-Z]*[ \t]*\r?\n?/;
   if (!opening.test(out)) return { text: out, stripped: false };
   out = out.replace(opening, '');
-  // The closing fence is absent when the reply was truncated.
-  out = out.replace(/\r?\n?```[\s\S]*$/, '');
+  // The closing fence is absent when the reply was truncated. Anchor to the
+  // very end: an unanchored match would cut at the first ``` inside the JSON
+  // (a code listing in `rawText` is enough) and silently drop the rest.
+  out = out.replace(/\r?\n?```[ \t]*$/, '');
   return { text: out.trim(), stripped: true };
 }
 
