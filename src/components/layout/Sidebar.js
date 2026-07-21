@@ -61,6 +61,10 @@ export function Sidebar({
           <SettingsIcon size={14} />
           Provider settings
         </Button>
+        <p className="text-center text-[11px] text-ink-faint">
+          v{process.env.NEXT_PUBLIC_BUILD_VERSION}
+          {process.env.NEXT_PUBLIC_BUILD_COMMIT ? ` (${process.env.NEXT_PUBLIC_BUILD_COMMIT})` : ''}
+        </p>
       </div>
     </div>
   );
