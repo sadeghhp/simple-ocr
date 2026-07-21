@@ -61,23 +61,65 @@ function customInstruction(config) {
   return instruction;
 }
 
-export function buildRequest(config, contentParts, { jsonMode = true } = {}) {
+/**
+ * Translate Chat-Completions-shaped content parts (`text`/`image_url`/`file`)
+ * into their Responses API equivalents (`input_text`/`input_image`/
+ * `input_file`). The two APIs describe the same content, just with different
+ * type names and a flattened `image_url` (a string, not `{ url }`).
+ */
+function toResponsesContentParts(parts) {
+  return (parts || []).map((part) => {
+    if (part.type === 'image_url') {
+      return { type: 'input_image', image_url: part.image_url?.url };
+    }
+    if (part.type === 'file') {
+      return { type: 'input_file', filename: part.file?.filename, file_data: part.file?.file_data };
+    }
+    return { type: 'input_text', text: part.text };
+  });
+}
+
+/**
+ * True when the resolved request URL is a Responses API endpoint
+ * (`.../responses`) rather than Chat Completions (`.../chat/completions`).
+ * Detected from the URL because that is the only signal available before a
+ * request is ever made — the provider config has no separate "API style" field.
+ */
+export function isResponsesApiUrl(requestUrl) {
+  try {
+    return /\/responses(?:\/|\?|$)/i.test(new URL(requestUrl).pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function buildRequest(config, contentParts, { jsonMode = true, apiStyle = 'chat' } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
   for (const header of config.headers || []) {
     const headerName = (header.name || '').trim();
     if (headerName) headers[headerName] = header.value ?? '';
   }
+  const systemMessages = buildSystemMessages(customInstruction(config));
+  const jsonModeEnabled = jsonMode && config.supportsJsonMode !== false;
+
+  if (apiStyle === 'responses') {
+    const body = {
+      model: config.model,
+      input: [...systemMessages, { role: 'user', content: toResponsesContentParts(contentParts) }],
+    };
+    // Same "send it, withdraw it on rejection" strategy as response_format below.
+    if (jsonModeEnabled) body.text = { format: { type: 'json_object' } };
+    return { headers, body };
+  }
+
   const body = {
     model: config.model,
-    messages: [
-      ...buildSystemMessages(customInstruction(config)),
-      { role: 'user', content: contentParts },
-    ],
+    messages: [...systemMessages, { role: 'user', content: contentParts }],
   };
   // Many OpenAI-compatible gateways reject response_format outright, so this is
   // sent optimistically and withdrawn on the one-shot downgrade in runOcr.
-  if (jsonMode && config.supportsJsonMode !== false) {
+  if (jsonModeEnabled) {
     body.response_format = { type: 'json_object' };
   }
   return { headers, body };
@@ -180,15 +222,21 @@ export function classifyProviderError({ status = null, message = '', code = null
 }
 
 /**
- * Extract text from an OpenAI-compatible chat-completions response.
+ * Extract text from an OpenAI-compatible response.
  * Every failure path reports what was actually received.
  */
-export function parseResponse(payload) {
+export function parseResponse(payload, { apiStyle = 'chat' } = {}) {
   const providerError = extractProviderError(payload);
   if (providerError) {
     throw classifyProviderError(providerError);
   }
 
+  if (apiStyle === 'responses') return parseResponsesApiPayload(payload);
+  return parseChatCompletionsPayload(payload);
+}
+
+/** Extract text from a Chat Completions payload (`choices[0].message.content`). */
+function parseChatCompletionsPayload(payload) {
   const choice = payload?.choices?.[0];
   if (!choice) {
     const keys = payload && typeof payload === 'object' ? Object.keys(payload) : [];
@@ -236,6 +284,69 @@ export function parseResponse(payload) {
     });
   }
   if (choice.message?.reasoning) {
+    throw new AppError(ERROR_CODES.EMPTY_COMPLETION, 'Model returned reasoning but no content', {
+      retryable: true,
+      detail: baseDetail,
+      hint: 'This model returned internal reasoning with an empty content field. Choose a non-reasoning model for OCR, or disable reasoning on the provider side.',
+    });
+  }
+  throw new AppError(ERROR_CODES.EMPTY_COMPLETION, 'Model returned empty content', {
+    retryable: true,
+    detail: baseDetail,
+  });
+}
+
+/**
+ * Extract text from a Responses API payload. Prefers the `output_text`
+ * convenience field; falls back to concatenating `output_text` parts off
+ * `message` items in `output`, since not every provider populates the former.
+ */
+function parseResponsesApiPayload(payload) {
+  const hasOutputArray = Array.isArray(payload?.output);
+  const outputText = typeof payload?.output_text === 'string' ? payload.output_text : null;
+
+  if (!hasOutputArray && outputText === null) {
+    const keys = payload && typeof payload === 'object' ? Object.keys(payload) : [];
+    throw new AppError(ERROR_CODES.INVALID_RESPONSE, 'Response contained no "output" array', {
+      retryable: true,
+      detail: `The reply had no "output" array. Top-level fields received: ${
+        keys.length ? keys.join(', ') : '(none)'
+      }.\nFull reply: ${truncate(payload)}`,
+      hint: 'This usually means the endpoint is not an OpenAI-compatible Responses API URL, or the provider returned an unexpected error shape.',
+    });
+  }
+
+  let text = outputText;
+  if (text === null) {
+    text = payload.output
+      .filter((item) => item?.type === 'message')
+      .flatMap((item) => (Array.isArray(item.content) ? item.content : []))
+      .map((part) => (typeof part === 'string' ? part : part?.text || ''))
+      .join('');
+  }
+
+  if (typeof text === 'string' && text.trim() !== '') return text;
+
+  // The model replied but produced no usable text — status/incomplete_details says why.
+  const reason = payload?.incomplete_details?.reason ?? null;
+  const baseDetail = `status: ${payload?.status ?? 'not reported'}, incomplete reason: ${
+    reason ?? 'not reported'
+  }. Output received: ${truncate(payload?.output ?? payload)}`;
+
+  if (reason === 'max_output_tokens') {
+    throw new AppError(ERROR_CODES.RESPONSE_TRUNCATED, 'Model hit its output limit', {
+      retryable: true,
+      detail: baseDetail,
+      hint: 'The model stopped at its maximum output length before producing text. Try a model with a larger output limit, or a smaller document.',
+    });
+  }
+  if (reason === 'content_filter') {
+    throw new AppError(ERROR_CODES.CONTENT_FILTERED, 'Blocked by the model content filter', {
+      detail: baseDetail,
+      hint: 'The provider blocked this document. Try a different model or provider.',
+    });
+  }
+  if (hasOutputArray && payload.output.some((item) => item?.type === 'reasoning')) {
     throw new AppError(ERROR_CODES.EMPTY_COMPLETION, 'Model returned reasoning but no content', {
       retryable: true,
       detail: baseDetail,
@@ -314,16 +425,22 @@ function createDeadline(callerSignal, timeoutMs) {
   };
 }
 
-/** One request/response cycle. Returns `{ text, payload }` or throws an AppError. */
+/**
+ * One request/response cycle. Returns `{ text, payload, apiStyle }` or throws
+ * an AppError.
+ */
 async function attemptOcr(
   contentParts,
   config,
   { fetchImpl, signal, jsonMode, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS }
 ) {
   // config.endpoint stores the base URL (e.g. http://localhost:1234/v1); the
-  // request goes to its /chat/completions path.
+  // request goes to its /chat/completions path — unless it already points at
+  // a Responses API endpoint, which is left as-is and drives a different wire
+  // format below.
   const requestUrl = buildCompletionsUrl(config.endpoint.trim());
-  const { headers, body } = buildRequest(config, contentParts, { jsonMode });
+  const apiStyle = isResponsesApiUrl(requestUrl) ? 'responses' : 'chat';
+  const { headers, body } = buildRequest(config, contentParts, { jsonMode, apiStyle });
 
   // The deadline covers reading the body too, not just the response headers:
   // a provider that streams one byte a minute is just as stuck.
@@ -435,7 +552,7 @@ async function attemptOcr(
 
     let text;
     try {
-      text = parseResponse(payload);
+      text = parseResponse(payload, { apiStyle });
     } catch (err) {
       // Attach the model actually used so mismatches are obvious.
       if (err instanceof AppError && err.detail) {
@@ -443,7 +560,7 @@ async function attemptOcr(
       }
       throw err;
     }
-    return { text, payload };
+    return { text, payload, apiStyle };
   }
 }
 
@@ -488,7 +605,7 @@ export async function runOcr(
     });
   }
 
-  const { text, payload } = result;
+  const { text, payload, apiStyle } = result;
   const parsed = parseExtractionPayload(text);
 
   let extraction;
@@ -515,7 +632,10 @@ export async function runOcr(
     rawMetadata: {
       responseModel: payload?.model ?? null,
       usage: payload?.usage ?? null,
-      finishReason: payload?.choices?.[0]?.finish_reason ?? null,
+      finishReason:
+        apiStyle === 'responses'
+          ? (payload?.incomplete_details?.reason ?? payload?.status ?? null)
+          : (payload?.choices?.[0]?.finish_reason ?? null),
     },
   };
 }

@@ -342,3 +342,103 @@ describe('testProviderConnection', () => {
     });
   });
 });
+
+describe('Responses API (auto-detected from the endpoint URL)', () => {
+  const responsesConfig = () => ({
+    ...config(),
+    endpoint: 'https://api.example.com/v1/responses',
+  });
+
+  it('builds an `input` body with input_text/input_image parts and text.format instead of messages/response_format', () => {
+    const parts = [
+      { type: 'text', text: 'Extract the text from this image.' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } },
+    ];
+    const { body } = buildRequest(responsesConfig(), parts, { apiStyle: 'responses' });
+    expect(body.messages).toBeUndefined();
+    expect(body.response_format).toBeUndefined();
+    expect(body.input[0].role).toBe('system');
+    expect(body.input.at(-1)).toEqual({
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Extract the text from this image.' },
+        { type: 'input_image', image_url: 'data:image/png;base64,AA==' },
+      ],
+    });
+    expect(body.text).toEqual({ format: { type: 'json_object' } });
+  });
+
+  it('omits text.format when jsonMode is disabled', () => {
+    const { body } = buildRequest(responsesConfig(), [{ type: 'text', text: 'hi' }], {
+      apiStyle: 'responses',
+      jsonMode: false,
+    });
+    expect(body.text).toBeUndefined();
+  });
+
+  it('parseResponse reads output_text when present', () => {
+    expect(parseResponse({ output_text: 'hello' }, { apiStyle: 'responses' })).toBe('hello');
+  });
+
+  it('parseResponse falls back to concatenating output_text parts off message items', () => {
+    const payload = {
+      output: [
+        { type: 'reasoning', content: [] },
+        {
+          type: 'message',
+          content: [
+            { type: 'output_text', text: 'a' },
+            { type: 'output_text', text: 'b' },
+          ],
+        },
+      ],
+    };
+    expect(parseResponse(payload, { apiStyle: 'responses' })).toBe('ab');
+  });
+
+  it('classifies a max_output_tokens incomplete response as RESPONSE_TRUNCATED', () => {
+    const payload = {
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [],
+    };
+    expect(() => parseResponse(payload, { apiStyle: 'responses' })).toThrow(
+      expect.objectContaining({ code: 'RESPONSE_TRUNCATED' })
+    );
+  });
+
+  it('reports the fields received when there is no output array', () => {
+    let thrown;
+    try {
+      parseResponse({ id: 'x' }, { apiStyle: 'responses' });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown.code).toBe('INVALID_RESPONSE');
+    expect(thrown.detail).toContain('id');
+  });
+
+  it('runOcr sends to the Responses API and parses output_text back into text', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      okResponse({
+        model: 'test-model-2024',
+        status: 'completed',
+        output_text: 'Extracted!',
+        usage: { total_tokens: 42 },
+      })
+    );
+    const result = await runOcr(
+      pngBlob(),
+      { mimeType: 'image/png', name: 'a.png' },
+      responsesConfig(),
+      { fetchImpl }
+    );
+    expect(result.text).toBe('Extracted!');
+    expect(result.model).toBe('test-model-2024');
+
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe('https://api.example.com/v1/responses');
+    const body = JSON.parse(init.body);
+    expect(body.input.at(-1).content[1].type).toBe('input_image');
+  });
+});
